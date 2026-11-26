@@ -11,7 +11,7 @@ llm-bonsai is a hands-on lab that runs the core building blocks of a production 
 
 Everything runs locally, so you need **no paid API keys**. Infrastructure is Helm charts and plain YAML. Automation and demos are small Python scripts run with [`uv`](https://docs.astral.sh/uv/).
 
-The goal is learning, not production. Each piece is the real thing (official images and charts, real config), only sized down: one replica, small models, tight memory limits. Building it phase by phase shows you how the pieces depend on each other and where they break.
+**This is a home-lab for study purposes, not a production setup.** Each piece is the real thing (official images and charts, real config), only sized down: one replica, small models, tight memory limits. Building it phase by phase shows you how the pieces depend on each other and where they break.
 
 ## Architecture
 
