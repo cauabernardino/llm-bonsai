@@ -35,6 +35,12 @@ migrationJob:
 # In monolith mode every gateway.* value configures the monolith pod.
 gateway:
   numWorkers: 1
+  # LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY for the langfuse_otel callback (made by `make secrets`).
+  envSecrets:
+    - litellm-langfuse
+  extraEnv:
+    - name: LANGFUSE_OTEL_HOST
+      value: http://langfuse-web.observability.svc.cluster.local:3000
   replicaCount: 1
   hpa:
     enabled: false
@@ -94,6 +100,13 @@ gateway:
         # Silently drop OpenAI params a provider doesn't support, instead of a 400.
         # The OpenAI SDK sends encoding_format=base64 on embeddings by default; Ollama rejects it.
         drop_params: true
+        # Sends every request (successes and failures) to Langfuse as OpenTelemetry spans.
+        # Not the classic `langfuse` callback: Langfuse v4 disables the legacy ingestion
+        # API it uses by default, so it would silently log nothing.
+        callbacks: ["langfuse_otel"]
+        # Turned into trace tags from the request's metadata. The gateway fills these from
+        # the virtual key, so the team on a trace can't be forgotten or spoofed by the client.
+        langfuse_default_tags: ["user_api_key_alias", "user_api_key_team_alias"]
 
       general_settings:
         master_key: os.environ/LITELLM_MASTER_KEY

@@ -43,7 +43,7 @@ Two namespaces: `llm` (Ollama, LiteLLM, Postgres, Valkey) and `observability` (L
 | 0 | Preflight and local cluster | ✅ |
 | 1 | Local model with Ollama | ✅ |
 | 2 | LiteLLM gateway (Postgres, Valkey, teams, keys) | ✅ |
-| 3 | Langfuse: tracing the gateway | planned |
+| 3 | Langfuse: tracing the gateway | ✅ |
 | 4 | Gateway demos: fallback, limits, cache, replicas, chaos, load test | planned |
 | 5 | App tracing with nested spans, prompt versions, a mini eval | planned |
 | 6 | Prometheus metrics (optional) | planned |
@@ -75,7 +75,8 @@ Rough sizes measured on this stack:
 | Ollama with `qwen2.5:0.5b` loaded | ~1 GiB |
 | Postgres + Valkey | ~120 MiB |
 | Kubernetes system pods | ~0.7 GiB |
-| Langfuse stack (Phase 3, ClickHouse capped) | ~5–6 GiB (estimate) |
+| Langfuse stack (web, worker, ClickHouse, Keeper, Postgres, Valkey, SeaweedFS) | ~1.8 GiB idle; ClickHouse grows with data, capped at 1.5 GiB |
+| cert-manager + ClickHouse operator | ~100 MiB |
 
 Every container has CPU/memory requests and limits. If memory gets tight, drop optional pieces in this order: Argo CD → vLLM → Prometheus → the second LiteLLM replica.
 
@@ -84,10 +85,12 @@ Every container has CPU/memory requests and limits. If memory gets tight, drop o
 ```bash
 make preflight      # check the machine; read the recommendation at the end
 make cluster        # minikube: 6 CPUs, 14 GB, metrics-server
-make up             # namespaces, secrets, Ollama, Postgres, Valkey, LiteLLM (~4 min the first time)
+make up             # everything: Ollama, Postgres, Valkey, Langfuse (+ prerequisites), LiteLLM
+                    # ~6 min the first time, mostly image pulls
 
 # in a second terminal, keep this running:
-make pf             # localhost:4000 → LiteLLM (restarts itself if it drops)
+make pf             # localhost:4000 → LiteLLM, localhost:3000 → Langfuse (restart themselves if they drop)
+                    # stop them with `make pf-stop` (or Ctrl-C in that terminal)
 
 make bootstrap      # create teams and their virtual keys, saved to .env
 make smoke          # end-to-end check through the gateway
@@ -96,7 +99,7 @@ make smoke          # end-to-end check through the gateway
 Tear down:
 
 ```bash
-make down           # uninstall everything from the cluster, including volumes
+make down           # uninstall the stack, including volumes (keeps cert-manager and the ClickHouse operator)
 make nuke           # delete the whole minikube cluster
 ```
 
@@ -112,12 +115,14 @@ infra/
   postgres/postgres.yaml  StatefulSet + Service (official postgres image)
   valkey/valkey.yaml      Deployment + Service (official valkey image)
   litellm/values.yaml     Helm values for the LiteLLM chart, including the model config
+  cert-manager/values.yaml
+  langfuse/values.yaml    Helm values for the Langfuse chart, sized for a laptop
 scripts/
   preflight.py            machine checks and cluster recommendation
   gen_secrets.py          random dev secrets into .env
   wait_ready.py           wait for every Deployment/StatefulSet in a namespace
   bootstrap_gateway.py    teams + virtual keys
-  smoke_test.py           end-to-end gateway check
+  smoke_test.py           end-to-end gateway check, including traces in Langfuse
 ```
 
 No Bitnami images or charts are used anywhere: Bitnami changed its free image catalog in 2025, and old references break. Postgres and Valkey use the official images with plain manifests.
@@ -254,6 +259,71 @@ print(client.chat.completions.create(
 - **Valkey is deployed but not yet connected to LiteLLM.** Phase 4 first shows two gateway replicas *without* shared state (each counts rate limits on its own, so the effective limit doubles), then connects Valkey and shows the limit holding.
 - Settings in the chart worth reading for production: an in-pod PgBouncer (`database.connectionPool`), a `collector` sidecar that moves spend accounting off the request path, a `/health/drain` preStop hook for graceful shutdowns, and HPA on requests/tokens per second through Prometheus Adapter.
 
+## Phase 3: Langfuse, tracing the gateway
+
+**What it does.**
+
+1. Installs two cluster-wide prerequisites: **cert-manager**, and the official **ClickHouse operator**. Langfuse chart 2.x doesn't run ClickHouse itself; it creates `ClickHouseCluster` and `KeeperCluster` resources, and the operator turns them into pods. The operator gets its webhook certificates from cert-manager.
+2. Installs **Langfuse v4** into `observability` with all its stores, each sized down from production defaults:
+
+   | Store | What Langfuse uses it for |
+   |---|---|
+   | ClickHouse (+ Keeper) | traces, observations and scores: the analytical data. Keeper coordinates ClickHouse; it's required even for one replica. |
+   | Postgres | users, projects, API keys, prompts, datasets: the transactional data |
+   | Valkey | job queues between `langfuse-web` (API/UI) and `langfuse-worker` (ingestion) |
+   | SeaweedFS | S3-compatible blob storage for raw event payloads and media |
+
+3. **Headless init:** `LANGFUSE_INIT_*` environment variables create the organisation, the project `llm-bonsai`, its API keys and an admin user on first boot. The keys come from `.env`, so LiteLLM and scripts can use them without anyone clicking through the UI.
+4. **Wires LiteLLM to Langfuse** with the `langfuse_otel` callback. Every gateway request (successes and failures) is exported as an OpenTelemetry span to Langfuse's OTLP endpoint.
+
+**What to expect at the end.**
+
+```
+$ make smoke
+PASS  chat completion (0.4s): 'Red' via chat-small, 41 tokens
+PASS  streaming (1.9s): 25 chunks → 'Rainbow is usually associated with ...'
+PASS  embeddings (0.7s): 768-dim vector
+PASS  forbidden model (chat-broken) (0.0s): rejected with HTTP 403
+PASS  traced in Langfuse (4.2s): 2 generations for smoke-6762fc98; chat-small: 64 tokens, 1.88s, $0.0089, team tag present
+PASS  failed call traced in Langfuse (4.1s): ERROR generation: litellm.APIConnectionError: ...
+all smoke checks passed
+```
+
+The two new checks poll Langfuse's API until this run's traces appear. That usually takes a few seconds, because ingestion is asynchronous: web → queue → worker → ClickHouse.
+
+**Try it.** With `make pf` running, open http://localhost:3000 and log in with `LANGFUSE_INIT_USER_EMAIL` / `LANGFUSE_INIT_USER_PASSWORD` from `.env`. Under **Tracing**, each gateway request is a `litellm_request` generation with model, tokens, latency, cost and tags. Filter by the tag `user_api_key_team_alias:support-bot` to see one team's traffic, or by level `ERROR` for failures.
+
+Send a request with your own user id and tags:
+
+```bash
+set -a; source .env; set +a
+curl localhost:4000/v1/chat/completions \
+  -H "Authorization: Bearer $LITELLM_KEY_SUPPORT_BOT" -H 'Content-Type: application/json' \
+  -d '{"model":"chat-small","user":"alice","metadata":{"tags":["experiment-1"]},
+       "messages":[{"role":"user","content":"Hello"}]}'
+```
+
+From the OpenAI SDK, the same thing is `user="alice", extra_body={"metadata": {"tags": ["experiment-1"]}}`.
+
+Read traces back through the API (project keys as basic auth):
+
+```bash
+curl -u "$LANGFUSE_PUBLIC_KEY:$LANGFUSE_SECRET_KEY" \
+  "localhost:3000/api/public/v2/observations?type=GENERATION&userId=alice&fields=core,basic,usage,model,metadata"
+```
+
+**Worth knowing.**
+
+- **Use `langfuse_otel`, not LiteLLM's classic `langfuse` callback.** Langfuse v4 disables the legacy ingestion API by default, so the classic callback would silently log nothing.
+- **Team tags come from the gateway, not the client.** `langfuse_default_tags: ["user_api_key_alias", "user_api_key_team_alias"]` makes LiteLLM tag every trace with the key and team that authenticated the request. Clients can add tags (`metadata.tags`) but can't remove or fake these. That's what makes per-team cost and quality views trustworthy.
+- **The OpenAI `user` field becomes the Langfuse user id.**
+- **Failures are traced, authorization rejections aren't.** An upstream error is recorded as an `ERROR` generation with the exception message. A 403 for a forbidden model is rejected before any LLM call, so it never reaches the tracing callback; that's what the gateway's own logs and spend tables are for.
+- **Langfuse v4 reads are observation-based.** The old `GET /api/public/traces` endpoint answers that it's unavailable in v4 "events_only" mode; use `GET /api/public/v2/observations`. Ask for field groups with `fields=`. `type`, `userId` and `level` work as filters, but **`tags` is silently ignored**, which is why the smoke test finds its traces by a unique user id.
+- **Sizing:** the chart's defaults are production-sized (100 Gi for ClickHouse, three Keeper replicas, 8 GiB requests). Here ClickHouse runs with `max_server_memory_usage` at 1.5 GiB under a 2 GiB limit, so under pressure it fails a query instead of getting OOM-killed. The whole stack idles at ~1.8 GiB.
+- **Langfuse's Valkey must not evict** (`maxmemory-policy noeviction`, enforced by the chart), because it holds job queues. The gateway's Valkey is the opposite (`allkeys-lru`) because it only holds a cache and counters. Same software, different job.
+- **All credentials live in one `langfuse` Secret built from `.env`**, following the chart's own minimal-installation example. Letting the chart generate passwords also works, but a reinstall could regenerate them while old volumes still expect the previous ones.
+- **On first install, `langfuse-web` and ClickHouse restart a few times.** Web tries to run ClickHouse migrations before the operator has created ClickHouse's Service, and ClickHouse waits for Keeper. It sorts itself out in a minute or two.
+
 ---
 
 ## Troubleshooting
@@ -266,7 +336,11 @@ print(client.chat.completions.create(
 | `helm upgrade`: `another operation (install/upgrade/rollback) is in progress` | A previous `helm` run was interrupted and left the release `pending-install`. | For a first install: `helm uninstall litellm -n llm`, then `make litellm`. |
 | `helm upgrade`: `conflict with "kubectl-set"` (or another manager) | Helm 4 uses server-side apply, and a field was changed by hand with `kubectl`. | Undo the manual change, or run the `helm upgrade` once with `--force-conflicts` to hand the field back to Helm. |
 | Embeddings return 400 `encoding_format ... not supported by ollama` | The OpenAI SDK's default base64 encoding. | Keep `litellm_settings.drop_params: true`, or pass `encoding_format="float"` from the client. |
-| `connection refused` on `localhost:4000` | The port-forward died, often after a pod restart. | Keep `make pf` running; it reconnects automatically. |
+| Langfuse chart: `ClickHouse operator CRDs not found` | The operator (and cert-manager) must be installed before the chart. | `make cert-manager clickhouse-operator`, then `make langfuse`. |
+| `langfuse-web` in `CrashLoopBackOff` right after install, logs say `lookup langfuse-clickhouse-headless ... no such host` | ClickHouse isn't up yet. | Wait 1–2 minutes. If it persists, check `kubectl get clickhousecluster,keepercluster -n observability`. |
+| No traces in Langfuse | Wrong callback, wrong host, or wrong keys. | Use `callbacks: ["langfuse_otel"]`; check `LANGFUSE_OTEL_HOST` points at `langfuse-web.observability.svc.cluster.local:3000` and that the `litellm-langfuse` Secret matches `.env`. |
+| `GET /api/public/traces` says "not available ... v4 events_only mode" | Expected in Langfuse v4. | Use `/api/public/v2/observations`. |
+| `connection refused` on `localhost:4000` or `:3000` | The port-forward died, often after a pod restart. | Keep `make pf` running; it reconnects automatically. |
 | `kubectl top` shows tiny or old numbers | metrics-server samples lag by up to a minute. | Wait a minute and check again. |
 | Odd `kubectl` errors or warnings | The `kubectl` client is more than one minor version away from the cluster. | `brew install kubernetes-cli` and check that `which kubectl` points to Homebrew. |
 
@@ -283,3 +357,7 @@ This is a local lab. All credentials are random, dev-only values in a gitignored
 | LiteLLM chart / image | 1.111.0 / v1.111.0 |
 | Postgres | 16.16-alpine |
 | Valkey | 9.2.1-alpine |
+| cert-manager chart | v1.21.3 |
+| ClickHouse operator chart | 0.0.8 |
+| Langfuse chart / app | 2.3.0 / 4.83.0 |
+| ClickHouse / Keeper | 26.8.36.3 |

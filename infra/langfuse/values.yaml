@@ -1,0 +1,124 @@
+# Chart langfuse/langfuse 2.3.0 (Langfuse 4.83.0), from https://langfuse.github.io/langfuse-k8s.
+# Every credential comes from the single `langfuse` Secret that `make secrets` builds from .env,
+# following the chart's examples/minimal-installation. Chart-generated passwords would not
+# survive a reinstall against retained volumes.
+
+langfuse:
+  salt:
+    secretKeyRef: { name: langfuse, key: salt }
+  encryptionKey:
+    secretKeyRef: { name: langfuse, key: encryption-key }
+  nextauth:
+    url: http://localhost:3000
+    secret:
+      secretKeyRef: { name: langfuse, key: nextauth-secret }
+
+  features:
+    telemetryEnabled: false
+    signUpDisabled: true
+
+  # Headless init: org, project, API keys and an admin user exist on first boot, no clicking.
+  additionalEnv:
+    - name: LANGFUSE_INIT_ORG_ID
+      value: llm-bonsai
+    - name: LANGFUSE_INIT_ORG_NAME
+      value: llm-bonsai
+    - name: LANGFUSE_INIT_PROJECT_ID
+      value: llm-bonsai
+    - name: LANGFUSE_INIT_PROJECT_NAME
+      value: llm-bonsai
+    - name: LANGFUSE_INIT_PROJECT_PUBLIC_KEY
+      valueFrom:
+        secretKeyRef: { name: langfuse, key: init-public-key }
+    - name: LANGFUSE_INIT_PROJECT_SECRET_KEY
+      valueFrom:
+        secretKeyRef: { name: langfuse, key: init-secret-key }
+    - name: LANGFUSE_INIT_USER_EMAIL
+      valueFrom:
+        secretKeyRef: { name: langfuse, key: init-user-email }
+    - name: LANGFUSE_INIT_USER_NAME
+      value: admin
+    - name: LANGFUSE_INIT_USER_PASSWORD
+      valueFrom:
+        secretKeyRef: { name: langfuse, key: init-user-password }
+
+  web:
+    resources:
+      requests: { cpu: 250m, memory: 768Mi }
+      limits: { cpu: "2", memory: 1536Mi }
+  worker:
+    resources:
+      requests: { cpu: 250m, memory: 512Mi }
+      limits: { cpu: "1", memory: 1Gi }
+
+postgresql:
+  auth:
+    existingSecret: langfuse
+    secretKeys:
+      userPasswordKey: postgresql-password
+      adminPasswordKey: postgresql-password
+  settings:
+    existingSecret: langfuse
+  userDatabase:
+    existingSecret: langfuse
+  image:
+    tag: "18.7"
+  storage:
+    requestedSize: 2Gi
+    # The chart default (Retain) would keep stale data around after `make down`.
+    persistentVolumeClaimRetentionPolicy:
+      whenDeleted: Delete
+      whenScaled: Retain
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: "1", memory: 512Mi }
+
+redis:
+  auth:
+    existingSecret: langfuse
+    existingSecretPasswordKey: redis-password
+    # Valkey ACL: the Secret key name is the username (`default`).
+    usersExistingSecret: langfuse
+  dataStorage:
+    requestedSize: 1Gi
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { cpu: 500m, memory: 256Mi }
+
+clickhouse:
+  auth:
+    existingSecret: langfuse
+    existingSecretKey: clickhouse-password
+  cluster:
+    replicas: 1
+    storage:
+      size: 5Gi
+    resources:
+      requests: { cpu: 500m, memory: 1Gi }
+      limits: { cpu: "2", memory: 2Gi }
+    settings:
+      # ClickHouse caches aggressively and would grow to ~90% of its limit; cap it below the
+      # container limit so it refuses big queries instead of getting OOM-killed.
+      max_server_memory_usage: 1610612736 # 1.5 GiB
+  keeper:
+    # Keeper is required by the ClickHouseCluster CRD even for one replica; 3 is for HA.
+    replicas: 1
+    storage:
+      size: 1Gi
+    resources:
+      requests: { cpu: 100m, memory: 128Mi }
+      limits: { cpu: 500m, memory: 512Mi }
+
+s3:
+  auth:
+    existingSecret: langfuse
+    rootUserSecretKey: s3-user
+    rootPasswordSecretKey: s3-password
+  allInOne:
+    s3:
+      existingConfigSecret: langfuse
+    data:
+      size: 5Gi
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits: { cpu: "1", memory: 1Gi }

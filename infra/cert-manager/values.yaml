@@ -1,0 +1,23 @@
+# Chart oci://quay.io/jetstack/charts/cert-manager v1.21.3.
+# Needed only because the ClickHouse operator issues its webhook certificates through it.
+crds:
+  enabled: true
+
+resources:
+  requests: { cpu: 10m, memory: 64Mi }
+  limits: { cpu: 200m, memory: 128Mi }
+
+webhook:
+  resources:
+    requests: { cpu: 10m, memory: 32Mi }
+    limits: { cpu: 100m, memory: 64Mi }
+
+cainjector:
+  resources:
+    requests: { cpu: 10m, memory: 64Mi }
+    limits: { cpu: 200m, memory: 192Mi }
+
+startupapicheck:
+  resources:
+    requests: { cpu: 10m, memory: 32Mi }
+    limits: { cpu: 100m, memory: 64Mi }
