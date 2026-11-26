@@ -1,0 +1,27 @@
+# Chart otwld/ollama 1.96.0 (Ollama 0.40.17). Runs on CPU: Metal isn't visible inside the Linux VM.
+ollama:
+  models:
+    # Pulled by a postStart hook; the pod only turns Ready once both are on disk.
+    pull:
+      - qwen2.5:0.5b
+      - nomic-embed-text
+
+extraEnv:
+  # Requests served concurrently per model; extra ones queue. The load test relies on this value.
+  - name: OLLAMA_NUM_PARALLEL
+    value: "2"
+  # Default is 5m; unloading between demos would add cold-start latency to the measurements.
+  - name: OLLAMA_KEEP_ALIVE
+    value: "24h"
+
+persistentVolume:
+  enabled: true
+  size: 5Gi
+
+resources:
+  requests:
+    cpu: "1"
+    memory: 1Gi
+  limits:
+    cpu: "3"
+    memory: 2Gi
