@@ -13,6 +13,11 @@ from pathlib import Path
 GIB = 1024**3
 MIN_FREE_DISK_GIB = 40
 CLUSTER_MEMORY_GIB = 14
+# The Docker VM needs room for its own kernel, dockerd and image unpacking on top of
+# minikube's limit; with only ~0.6 GiB spare the whole minikube container got OOM-killed.
+# Docker Desktop set to 17 GB shows up as ~16.6 GiB of MemTotal inside the VM.
+DOCKER_DESKTOP_MEMORY_GB = 17
+MIN_DOCKER_VM_GIB = 16.5
 TOOLS = {
     "kubectl": ["kubectl", "version", "--client", "-o", "json"],
     "helm": ["helm", "version", "--short"],
@@ -101,10 +106,10 @@ def main() -> None:
         print(
             f"- Cluster: minikube --driver=docker --cpus=6 --memory={CLUSTER_MEMORY_GIB}g --disk-size=40g"
         )
-        if docker_mem_gib is not None and docker_mem_gib < CLUSTER_MEMORY_GIB:
+        if docker_mem_gib is not None and docker_mem_gib < MIN_DOCKER_VM_GIB:
             print(
-                f"- Docker VM has {docker_mem_gib:.1f} GiB; raise it to ≥ {CLUSTER_MEMORY_GIB} GiB "
-                "(Docker Desktop → Settings → Resources) before starting minikube."
+                f"- Docker VM has {docker_mem_gib:.1f} GiB; set Docker Desktop → Settings → Resources "
+                f"→ Memory to ≥ {DOCKER_DESKTOP_MEMORY_GB} GB before starting minikube."
             )
     missing = [name for name, version in tools.items() if version is None and name != "orbctl"]
     if tools["orbctl"]:

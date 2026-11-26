@@ -1,0 +1,99 @@
+# Chart oci://ghcr.io/berriai/litellm/chart/litellm 1.111.0 (image ghcr.io/berriai/litellm:v1.111.0).
+
+# Service/Deployment are named plain `litellm` instead of `litellm-litellm`.
+fullnameOverride: litellm
+
+# One pod running the full proxy (gateway + management API + UI). The chart's default
+# split into gateway/backend/ui at 4Gi each doesn't fit the laptop budget.
+monolith:
+  enabled: true
+
+masterKey:
+  secretName: litellm-master-key
+  secretKey: master-key
+
+# The chart ships no database. It passes these as DATABASE_* env vars and the
+# proxy's entrypoint assembles DATABASE_URL from them.
+database:
+  writer:
+    host: postgres.llm.svc.cluster.local
+    port: 5432
+    dbname: litellm
+    passwordSecret:
+      name: litellm-db
+      usernameKey: username
+      passwordKey: password
+
+migrationJob:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+
+# In monolith mode every gateway.* value configures the monolith pod.
+gateway:
+  numWorkers: 1
+  replicaCount: 1
+  hpa:
+    enabled: false
+  # Measured on v1.111.0: ~1.2Gi steady, 1.8Gi peak while starting up (1.5Gi got OOMKilled).
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1280Mi
+    limits:
+      cpu: "2"
+      memory: 2560Mi
+  # Prisma setup makes the first boot slow; don't let liveness kill it meanwhile.
+  startupProbe:
+    httpGet: { path: /health/readiness, port: http }
+    periodSeconds: 5
+    failureThreshold: 60
+
+  config:
+    proxy_config:
+      model_list:
+        - model_name: chat-small
+          litellm_params:
+            model: ollama_chat/qwen2.5:0.5b
+            api_base: http://ollama.llm.svc.cluster.local:11434
+          # Fake prices: local models cost $0, so budgets could never be hit otherwise.
+          model_info:
+            input_cost_per_token: 0.0001
+            output_cost_per_token: 0.0002
+
+        # Points at nothing on purpose, to demonstrate fallbacks. Fail fast, no retries.
+        - model_name: chat-broken
+          litellm_params:
+            model: ollama_chat/qwen2.5:0.5b
+            api_base: http://does-not-exist.llm.svc.cluster.local:1234
+            timeout: 5
+            num_retries: 0
+
+        - model_name: embed
+          litellm_params:
+            model: ollama/nomic-embed-text
+            api_base: http://ollama.llm.svc.cluster.local:11434
+
+        # A cloud model would only ever be added like this, reading its key from env:
+        # - model_name: chat-cloud
+        #   litellm_params:
+        #     model: bedrock/anthropic.claude-sonnet-...
+        #     aws_region_name: os.environ/AWS_REGION
+
+      router_settings:
+        fallbacks:
+          - chat-broken: [chat-small]
+        # Upper bound per LLM call. A 0.5B model on CPU answers well within this,
+        # but queued requests under load can take a while.
+        timeout: 120
+
+      litellm_settings:
+        # Silently drop OpenAI params a provider doesn't support, instead of a 400.
+        # The OpenAI SDK sends encoding_format=base64 on embeddings by default; Ollama rejects it.
+        drop_params: true
+
+      general_settings:
+        master_key: os.environ/LITELLM_MASTER_KEY

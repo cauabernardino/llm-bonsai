@@ -7,3 +7,5 @@ __pycache__/
 
 # Contains host-specific details; an anonymized version may be committed later.
 SPEC.md
+# Personal lab notes (machine-specific results). README.md is the public guide.
+NOTES.md

@@ -3,4 +3,8 @@ name = "llm-bonsai"
 version = "0.1.0"
 description = "A tiny local GenAI platform lab: LiteLLM + Langfuse + Ollama on Kubernetes"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "httpx>=0.29.0",
+    "openai>=3.60.0",
+    "python-dotenv>=1.2.4",
+]

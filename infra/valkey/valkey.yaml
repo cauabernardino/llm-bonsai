@@ -1,0 +1,56 @@
+# Shared state for LiteLLM replicas (rate-limit counters, response cache).
+# In-memory only: losing it on restart just resets counters and the cache.
+apiVersion: v1
+kind: Service
+metadata:
+  name: valkey
+  namespace: llm
+spec:
+  selector:
+    app: valkey
+  ports:
+    - name: valkey
+      port: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: valkey
+  namespace: llm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: valkey
+  template:
+    metadata:
+      labels:
+        app: valkey
+    spec:
+      containers:
+        - name: valkey
+          image: valkey/valkey:9.2.1-alpine
+          args:
+            - valkey-server
+            - --save
+            - ""
+            - --appendonly
+            - "no"
+            - --maxmemory
+            - 192mb
+            - --maxmemory-policy
+            - allkeys-lru
+          ports:
+            - name: valkey
+              containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["valkey-cli", "ping"]
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
