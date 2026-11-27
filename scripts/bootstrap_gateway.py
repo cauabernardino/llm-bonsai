@@ -1,7 +1,7 @@
 """Create the demo teams and one virtual key per team, and save the keys to .env.
 
-Safe to re-run: teams are matched by alias, and a key already in .env is kept
-as long as the gateway still recognises it.
+Safe to re-run: teams are matched by alias, and a key already in .env is kept as
+long as the gateway still recognises it, with its limits updated to match TEAMS.
 """
 
 import os
@@ -25,10 +25,11 @@ class Team:
     max_budget: float
 
 
+# Budgets are generous on purpose: the demos that need to run out of budget create
+# their own throwaway keys, and load/chaos runs spend a few fake dollars each.
 TEAMS = [
-    # Tight limits so the demos can hit them: 3 requests/min and a 5-cent budget.
-    Team("payments-ai", "LITELLM_KEY_PAYMENTS_AI", ["chat-small", "chat-broken"], 3, 0.05),
-    Team("support-bot", "LITELLM_KEY_SUPPORT_BOT", ["chat-small", "embed"], 600, 10.0),
+    Team("payments-ai", "LITELLM_KEY_PAYMENTS_AI", ["chat-small", "chat-broken"], 3, 1000.0),
+    Team("support-bot", "LITELLM_KEY_SUPPORT_BOT", ["chat-small", "embed"], 600, 1000.0),
 ]
 
 
@@ -47,19 +48,22 @@ def key_is_valid(client: httpx.Client, key: str) -> bool:
     return client.get("/key/info", params={"key": key}).status_code == 200
 
 
+def key_limits(team: Team) -> dict:
+    return {"models": team.models, "rpm_limit": team.rpm_limit, "max_budget": team.max_budget}
+
+
+def update_key(client: httpx.Client, team: Team, key: str) -> None:
+    """Bring an existing key in line with TEAMS, so changing a limit here takes effect on re-run."""
+    client.post("/key/update", json={"key": key, **key_limits(team)}).raise_for_status()
+
+
 def create_key(client: httpx.Client, team: Team, team_id: str) -> str:
     alias = f"{team.alias}-key"
     # A key left over from a lost .env would block the alias; remove it first.
     client.post("/key/delete", json={"key_aliases": [alias]})
     response = client.post(
         "/key/generate",
-        json={
-            "team_id": team_id,
-            "key_alias": alias,
-            "models": team.models,
-            "rpm_limit": team.rpm_limit,
-            "max_budget": team.max_budget,
-        },
+        json={"team_id": team_id, "key_alias": alias, **key_limits(team)},
     ).raise_for_status()
     return response.json()["key"]
 
@@ -80,15 +84,14 @@ def main() -> None:
         for team in TEAMS:
             team_id = ensure_team(client, team)
             key = os.environ.get(team.env_var)
+            limits = f"models={team.models}, rpm={team.rpm_limit}, budget=${team.max_budget:g}"
             if key and key_is_valid(client, key):
-                print(f"{team.alias}: team {team_id}, key unchanged ({team.env_var})")
+                update_key(client, team, key)
+                print(f"{team.alias}: team {team_id}, existing key updated ({limits})")
                 continue
             key = create_key(client, team, team_id)
             set_key(ENV_FILE, team.env_var, key)
-            print(
-                f"{team.alias}: team {team_id}, new key saved as {team.env_var} "
-                f"(models={team.models}, rpm={team.rpm_limit}, budget=${team.max_budget})"
-            )
+            print(f"{team.alias}: team {team_id}, new key saved as {team.env_var} ({limits})")
 
 
 if __name__ == "__main__":

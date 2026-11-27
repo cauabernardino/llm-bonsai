@@ -6,24 +6,16 @@ Every request carries a per-run user id, which is how the Langfuse checks find t
 run's traces.
 """
 
-import os
 import sys
 import time
-import uuid
-from pathlib import Path
 
-import httpx
 import openai
-from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+import lab
 
-GATEWAY_URL = os.environ.get("LITELLM_URL", "http://localhost:4000")
-LANGFUSE_URL = os.environ.get("LANGFUSE_URL", "http://localhost:3000")
 # support-bot may use chat-small and embed, but not chat-broken.
 FORBIDDEN_MODEL = "chat-broken"
 TEAM = "support-bot"
-TRACE_DEADLINE_S = 60
 
 
 def check(name: str, fn) -> bool:
@@ -37,35 +29,9 @@ def check(name: str, fn) -> bool:
     return True
 
 
-def wait_for_generations(langfuse: httpx.Client, user_id: str, **filters) -> list[dict]:
-    """Poll Langfuse until generations for `user_id` show up; ingestion is asynchronous."""
-    params = {
-        "type": "GENERATION",
-        "userId": user_id,
-        "fields": "core,basic,usage,model,metadata",
-        **filters,
-    }
-    deadline = time.monotonic() + TRACE_DEADLINE_S
-    while time.monotonic() < deadline:
-        found = langfuse.get("/api/public/v2/observations", params=params).raise_for_status()
-        if data := found.json()["data"]:
-            return data
-        time.sleep(2)
-    raise AssertionError(f"nothing in Langfuse for user {user_id} {filters} after {TRACE_DEADLINE_S}s")
-
-
 def main() -> None:
-    key = os.environ.get("LITELLM_KEY_SUPPORT_BOT")
-    if not key:
-        sys.exit("LITELLM_KEY_SUPPORT_BOT missing from .env; run `make bootstrap` first")
-    client = openai.OpenAI(base_url=f"{GATEWAY_URL}/v1", api_key=key, max_retries=0)
-    langfuse = httpx.Client(
-        base_url=LANGFUSE_URL,
-        auth=(os.environ["LANGFUSE_PUBLIC_KEY"], os.environ["LANGFUSE_SECRET_KEY"]),
-        timeout=10,
-    )
-
-    user_id = f"smoke-{uuid.uuid4().hex[:8]}"
+    client = lab.gateway(lab.env("LITELLM_KEY_SUPPORT_BOT"))
+    user_id = lab.run_id("smoke")
     # `user` is the OpenAI field LiteLLM maps to the Langfuse user id; tags are free-form.
     tracing = {"user": user_id, "extra_body": {"metadata": {"tags": ["smoke-test"]}}}
     messages = [{"role": "user", "content": "Name one colour of the rainbow. One word."}]
@@ -99,7 +65,8 @@ def main() -> None:
         raise AssertionError(f"{FORBIDDEN_MODEL} was allowed for the support-bot key")
 
     def traced():
-        generations = wait_for_generations(langfuse, user_id)
+        # chat + stream are both chat-small generations; wait for both so neither is missed.
+        generations = lab.wait_for_generations(user_id, at_least=2)
         chat_gen = next(g for g in generations if g["model"] == "chat-small")
         tags = chat_gen["metadata"].get("attributes.langfuse.trace.tags", [])
         assert f"user_api_key_team_alias:{TEAM}" in tags, f"team tag missing from {tags}"
@@ -113,9 +80,7 @@ def main() -> None:
     def failure_traced():
         # Only the master key may call chat-broken with fallbacks off, i.e. force a real
         # upstream failure. Langfuse should record it as an ERROR-level generation.
-        admin = openai.OpenAI(
-            base_url=f"{GATEWAY_URL}/v1", api_key=os.environ["LITELLM_MASTER_KEY"], max_retries=0
-        )
+        admin = lab.gateway(lab.env("LITELLM_MASTER_KEY"))
         try:
             admin.chat.completions.create(
                 model="chat-broken",
@@ -127,7 +92,7 @@ def main() -> None:
             pass
         else:
             raise AssertionError("chat-broken unexpectedly succeeded")
-        failed = wait_for_generations(langfuse, user_id, level="ERROR")[0]
+        failed = lab.wait_for_generations(user_id, level="ERROR")[0]
         return f"ERROR generation: {failed['statusMessage'][:70]}…"
 
     results = [

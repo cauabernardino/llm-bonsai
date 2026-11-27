@@ -24,6 +24,13 @@ database:
       usernameKey: username
       passwordKey: password
 
+# Shared state across replicas: the chart emits REDIS_HOST/REDIS_PORT, which the proxy uses
+# for cross-pod rate limits and spend counters. Without it each pod counts on its own
+# (scripts/demo_replicas.py shows the difference).
+redis:
+  host: valkey.llm.svc.cluster.local
+  port: 6379
+
 migrationJob:
   resources:
     requests:
@@ -107,6 +114,15 @@ gateway:
         # Turned into trace tags from the request's metadata. The gateway fills these from
         # the virtual key, so the team on a trace can't be forgotten or spoofed by the client.
         langfuse_default_tags: ["user_api_key_alias", "user_api_key_team_alias"]
+        # Response cache in Valkey, opt-in per request with {"cache": {"use-cache": true}}.
+        # Opt-in so the limit/budget/load demos measure the model, not the cache.
+        cache: true
+        cache_params:
+          type: redis
+          host: valkey.llm.svc.cluster.local
+          port: 6379
+          mode: default_off
+          ttl: 600
 
       general_settings:
         master_key: os.environ/LITELLM_MASTER_KEY

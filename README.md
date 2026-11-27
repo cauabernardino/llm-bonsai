@@ -44,7 +44,7 @@ Two namespaces: `llm` (Ollama, LiteLLM, Postgres, Valkey) and `observability` (L
 | 1 | Local model with Ollama | ✅ |
 | 2 | LiteLLM gateway (Postgres, Valkey, teams, keys) | ✅ |
 | 3 | Langfuse: tracing the gateway | ✅ |
-| 4 | Gateway demos: fallback, limits, cache, replicas, chaos, load test | planned |
+| 4 | Gateway demos: fallback, limits, cache, replicas, chaos, load test | ✅ |
 | 5 | App tracing with nested spans, prompt versions, a mini eval | planned |
 | 6 | Prometheus metrics (optional) | planned |
 | 7 | vLLM on CPU (optional) | planned |
@@ -123,6 +123,9 @@ scripts/
   wait_ready.py           wait for every Deployment/StatefulSet in a namespace
   bootstrap_gateway.py    teams + virtual keys
   smoke_test.py           end-to-end gateway check, including traces in Langfuse
+  lab.py                  shared helpers for the demos (clients, throwaway keys, Langfuse polling)
+  demo_fallback.py demo_limits.py demo_cache.py demo_replicas.py demo_chaos.py
+  load_test.py            asyncio load generator: latency, TTFT, error rate per concurrency
 ```
 
 No Bitnami images or charts are used anywhere: Bitnami changed its free image catalog in 2025, and old references break. Postgres and Valkey use the official images with plain manifests.
@@ -201,10 +204,12 @@ Other ways in:
 
    | Team | Allowed models | Limits |
    |---|---|---|
-   | `payments-ai` | `chat-small`, `chat-broken` | 3 requests/min, $0.05 budget (deliberately tiny) |
-   | `support-bot` | `chat-small`, `embed` | 600 requests/min, $10 budget |
+   | `payments-ai` | `chat-small`, `chat-broken` | 3 requests/min, $1000 budget |
+   | `support-bot` | `chat-small`, `embed` | 600 requests/min, $1000 budget |
 
-   The keys are written to `.env` as `LITELLM_KEY_PAYMENTS_AI` and `LITELLM_KEY_SUPPORT_BOT`. It's safe to re-run: existing teams are reused, and valid keys are kept.
+   The keys are written to `.env` as `LITELLM_KEY_PAYMENTS_AI` and `LITELLM_KEY_SUPPORT_BOT`. It's safe to re-run: existing teams are reused, and valid keys are kept with their limits updated to match the script, so changing a limit there and re-running `make bootstrap` applies it.
+
+   The budgets are generous on purpose. Load and chaos runs spend a few fake dollars each, and the Phase 4 demos that need to *run out* of budget create throwaway keys with a tiny one.
 
 **What to expect at the end.**
 
@@ -253,10 +258,9 @@ print(client.chat.completions.create(
 **Worth knowing.**
 
 - **Spend lags by a few seconds.** LiteLLM writes spend to Postgres in batches, not on every request.
-- **Local models cost $0**, so `chat-small` carries made-up `input_cost_per_token`/`output_cost_per_token` values. Without them, no budget could ever be reached. One short chat costs ~$0.005, so `payments-ai`'s $0.05 lasts about 10 calls (Phase 4 shows what happens at the edge).
+- **Local models cost $0**, so `chat-small` carries made-up `input_cost_per_token`/`output_cost_per_token` values. Without them, no budget could ever be reached. One short chat costs ~$0.005; `make demo-limits` (Phase 4) shows what happens when a key reaches its budget.
 - **`drop_params: true`.** The OpenAI SDK sends `encoding_format=base64` on embeddings by default, and the Ollama provider rejects it with a 400. Dropping params a provider doesn't support keeps the gateway transparent to clients. The trade-off is that unsupported parameters are now ignored silently.
 - **The chart doesn't ship a database**, and it never builds `DATABASE_URL` itself. It passes `DATABASE_HOST/PORT/USER/NAME/PASSWORD` and the image assembles (and URL-encodes) the URL. Database migrations run as a Helm **pre-install hook Job**, so Postgres must be up before LiteLLM is installed; `make up` does it in that order.
-- **Valkey is deployed but not yet connected to LiteLLM.** Phase 4 first shows two gateway replicas *without* shared state (each counts rate limits on its own, so the effective limit doubles), then connects Valkey and shows the limit holding.
 - Settings in the chart worth reading for production: an in-pod PgBouncer (`database.connectionPool`), a `collector` sidecar that moves spend accounting off the request path, a `/health/drain` preStop hook for graceful shutdowns, and HPA on requests/tokens per second through Prometheus Adapter.
 
 ## Phase 3: Langfuse, tracing the gateway
@@ -324,6 +328,209 @@ curl -u "$LANGFUSE_PUBLIC_KEY:$LANGFUSE_SECRET_KEY" \
 - **All credentials live in one `langfuse` Secret built from `.env`**, following the chart's own minimal-installation example. Letting the chart generate passwords also works, but a reinstall could regenerate them while old volumes still expect the previous ones.
 - **On first install, `langfuse-web` and ClickHouse restart a few times.** Web tries to run ClickHouse migrations before the operator has created ClickHouse's Service, and ClickHouse waits for Keeper. It sorts itself out in a minute or two.
 
+## Phase 4: Gateway demos
+
+**What it does.** Connects Valkey to LiteLLM, then runs one script per gateway behaviour. Every demo prints the same three things:
+
+1. **which key** it runs as, and the **prompt** it sends;
+2. what happened, with real numbers;
+3. a short **"What you just saw"**: only what this run demonstrated, plus anything worth knowing that it *didn't* show, labelled **"Not shown here"**.
+
+All of them need `make pf` running. If the gateway doesn't answer, each script says so and stops instead of crashing.
+
+Two config changes come with this phase (`infra/litellm/values.yaml`):
+
+- `redis.host` points at Valkey, so rate limits and spend counters are **shared across gateway replicas**;
+- a **response cache** in Valkey, **opt-in** per request (`cache_params.mode: default_off`). With caching on for everything, the limits, budget and load demos would measure the cache instead of the model, and cached answers cost $0, so no budget could ever be reached.
+
+The fallback, limits and replicas demos create a **throwaway key** with `payments-ai`'s limits and delete it at the end. Re-running them never uses up the long-lived keys from `make bootstrap`. The others use the `support-bot` key.
+
+| Command | Shows | Takes |
+|---|---|---|
+| `make demo-fallback` | A dead model answered by its fallback | seconds |
+| `make demo-limits` | Rate limit (3/min), then a $0.05 budget running out | ~1.5 min |
+| `make demo-cache` | One prompt, four requests: model, cache hit, parameter change, no opt-in | seconds |
+| `make demo-replicas` | 2 gateway replicas with and without shared state | ~2.5 min |
+| `make demo-chaos` | Deleting the gateway pod under load | ~1.5 min |
+| `make load` | Latency and TTFT at concurrency 1, 2, 4 and 8 | ~1.5 min |
+
+The outputs below are real runs (summaries left out). Your timings will differ.
+
+### Fallback
+
+```
+Key:    throwaway key, team payments-ai (deleted at the end)
+Prompt: 'In one sentence: what is a payment refund?'
+
+Requested model chat-broken → HTTP 200 in 1.00s
+Response headers:
+  x-litellm-model-group: chat-small
+  x-litellm-attempted-fallbacks: 1
+  x-litellm-model-api-base: http://ollama.llm.svc.cluster.local:11434
+Answer: A payment refund is the process of returning the amount originally owed to a recipient after receiving an online payment.
+
+Langfuse, user fallback-75f784a6:
+    start     took  outcome
+  +   0ms      5ms  ERROR  does-not-exist.llm.svc.cluster.local:1234 [Name or service not known]
+  +  18ms    922ms  ok     ollama_chat/qwen2.5:0.5b
+  UI: http://localhost:3000 → Tracing → filter User ID = fallback-75f784a6
+```
+
+- **The client asked for `chat-broken` and got a normal HTTP 200.** Only the `x-litellm-*` response headers reveal the failover.
+- **Langfuse keeps both attempts under one user id.** It records the backend rather than the model name the client asked for, so the dead host in the `ERROR` line is how you tell which deployment failed.
+- **This backend failed in 5 ms**, on a DNS error. A backend that *hangs* instead costs up to `timeout` × (1 + `num_retries`) before the fallback starts, which is why `chat-broken` sets `timeout: 5` and `num_retries: 0`.
+- **Faking a failure:** LiteLLM can do it with `"mock_testing_fallbacks": true` in a request, but current versions reject it unless an admin sets `general_settings.dangerously_allow_mock_testing_request_params: true`. Otherwise any caller could force failovers.
+
+### Limits and budgets
+
+```
+Key:    throwaway key, team payments-ai: 3 requests/min, $0.05 budget (deleted at the end)
+Prompt: part 1 'hi' (max_tokens=1) · part 2 a 1996-char refund policy (max_tokens=20, ~$0.04 each):
+        Summarise this refund policy in one sentence. Customers may return items within thirty day…
+
+Part 1: rate limit, 10 requests in a row
+  #1  HTTP 200
+  #2  HTTP 200
+  #3  HTTP 200
+  #4  HTTP 429  retry-after: 60  (window resets in 60s)
+  #5  HTTP 429
+  ⋮   (#6–#10 the same; abridged)
+  → 3 of 10 allowed
+
+… waiting 60s for the rate-limit window to reset
+
+Part 2: budget, expensive requests until the gateway says no (budget $0.05)
+  spend so far: $0.0096 (part 1)
+  #1  HTTP 200  $0.0096 → $0.0522  ← crossed $0.05, still allowed
+  #2  HTTP 422  Budget has been exceeded
+
+Spend, summed from x-litellm-response-cost headers: $0.0522
+Spend in Postgres (/key/info) right now:            $0.0096
+```
+
+- **Rate limits return HTTP 429** with `retry-after`: back off, then try again.
+- **Budgets are checked before a request, and cost is added after it.** The request that crosses the budget succeeds; only later ones are refused. You can therefore overspend by up to one request's cost, so cap `max_tokens` or leave headroom. This demo sends requests one at a time. Recent LiteLLM versions also hold a reservation for each in-flight request's estimated cost, but concurrent requests aren't tested here.
+- **Budget refusals are HTTP 422** in this version ("Budget has been exceeded"), not 429. Retrying won't help until someone raises the budget.
+- **Postgres lags behind.** The gateway enforces limits from its own counters in Valkey, while `/key/info` and the UI read Postgres, which is written in batches.
+
+### Cache
+
+```
+Key:    support-bot (long-lived key from `make bootstrap`)
+Prompt: 'Write a haiku about a bonsai tree. (run df295a)'
+        the random run id makes request #1 a guaranteed cache miss
+
+ #  request                         took  cache  cost
+ 1  opt in                       1199 ms  miss   $0.0097
+ 2  opt in, same as #1             20 ms  HIT    $0.0000
+ 3  opt in, temperature=0.1       487 ms  miss   $0.0085
+ 4  no opt-in                    1194 ms  off    $0.0099
+
+Answer #1 (model): Bonsai's roots deep,   / Leaves of light, shadows weaved—   / Spring growth, each drop.
+Answer #2 (cache): Bonsai's roots deep,   / Leaves of light, shadows weaved—   / Spring growth, each drop.  ← identical to #1
+Answer #4 (model): In a few years, it'll be a sapling, / Bonsai tree standing tall, / New growth fills the space.
+```
+
+To opt in, send `"cache": {"use-cache": true}` (from the OpenAI SDK: `extra_body={"cache": {"use-cache": True}}`). What each request shows:
+
+- **#2** is a hit: about 60× faster, $0, and word for word #1's answer.
+- **#3** changed only `temperature` and missed: the cache key covers model, messages *and* parameters. This is exact-match caching.
+- **#4** didn't opt in, so the model ran and wrote a different haiku.
+
+### Replicas: why shared state matters
+
+```
+Key:    throwaway key per scenario, team payments-ai: 3 requests/min (deleted at the end)
+Prompt: 'hi' × 16 (max_tokens=1), sent from a pod inside the cluster
+
+Scenario 1: 2 replicas, no Valkey
+  redeploying the gateway: 2 replicas, Valkey off (helm upgrade, ~1 min)…
+  gateway: 2 ready replica(s), REDIS_HOST=unset
+  16 requests through the Service → 6 × HTTP 200, 10 × HTTP 429
+    litellm-6c74b6d5c8-d2jmp: 3 × HTTP 200, 2 × HTTP 429
+    litellm-6c74b6d5c8-n7bk7: 3 × HTTP 200, 8 × HTTP 429
+
+Scenario 2: 2 replicas, Valkey for shared state
+  redeploying the gateway: 2 replicas, Valkey on (helm upgrade, ~1 min)…
+  gateway: 2 ready replica(s), REDIS_HOST=valkey.llm.svc.cluster.local
+  16 requests through the Service → 3 × HTTP 200, 13 × HTTP 429
+    litellm-6448bb6878-q6c7d: 1 × HTTP 200, 4 × HTTP 429
+    litellm-6448bb6878-z6q44: 2 × HTTP 200, 9 × HTTP 429
+
+Restoring the normal gateway
+  redeploying the gateway: 1 replica, Valkey on (helm upgrade, ~1 min)…
+  gateway: 1 ready replica(s), REDIS_HOST=valkey.llm.svc.cluster.local
+```
+
+The per-pod lines are counted from each pod's access log, and they make the point visible:
+
+- **Without Valkey, each pod enforced its own 3/minute** (3 + 3), so the effective limit doubled.
+- **With Valkey, both pods shared one counter** (1 + 2 = 3).
+
+How the demo works:
+
+- It redeploys the gateway for each scenario (`make litellm LITELLM_ARGS=...`), and **always** restores the single-replica config at the end, even if a step fails. Add `--keep-replicas` to leave two running.
+- The burst comes from a short-lived **pod inside the cluster**, because `kubectl port-forward svc/litellm` sends everything to a single pod and would hide the load balancing.
+
+### Chaos: deleting the gateway pod
+
+```
+Key:    support-bot (long-lived key from `make bootstrap`)
+Prompt: 'Explain in three sentences why the sky is blue.' (2 concurrent streams for 90s, max_tokens=32)
+
+The gateway pod gets deleted at t=15s.
+
+t= 15.1s  deleted pod litellm-6448bb6878-f2zmb
+t= 36.0s  replacement pod Ready
+
+Requests by start time (5s buckets):
+    0–5  s  6 ok
+    5–10 s  4 ok
+   10–15 s  4 ok
+   15–20 s  none started (workers stuck on connections to the dead pod)
+   20–25 s  none started (workers stuck on connections to the dead pod)
+   25–30 s  none started (workers stuck on connections to the dead pod)
+   30–35 s  0 ok, 18 failed
+   35–40 s  4 ok, 2 failed
+   40–45 s  4 ok
+   ⋮   (4 ok per bucket until the end; abridged)
+
+Failed attempts: 20 (ConnectError, ReadError, RemoteProtocolError). Workers retry every 0.25s, so this counts retries, not users.
+Outage: 20.3s, nearly all of it waiting for the replacement pod; the port-forward picked it up right away (timings ±1s)
+```
+
+**One replica means a full outage**, about 20 s here. It's almost all Kubernetes creating the replacement pod, LiteLLM starting up and its readiness probe passing.
+
+- **In-flight requests** finished normally in this run: on SIGTERM the server stops taking new connections but completes what it has. Other runs can cut off a stream mid-way; the script tells you which happened.
+- **New requests** hung or failed.
+
+Not shown here: with 2+ replicas, new connections go to the surviving pod. In production, pair that with a PodDisruptionBudget and a draining `preStop` hook (LiteLLM's `/health/drain`), so upgrades finish their streams first.
+
+### Load test: queueing, not computing
+
+```
+Key:    support-bot (long-lived key from `make bootstrap`)
+Prompt: 'Explain in three sentences why the sky is blue.' (every request, streamed, max_tokens=64)
+
+chat-small, 20s per concurrency level
+
+conc  reqs  req/s  p50 lat  p95 lat p50 ttft p95 ttft  errors
+   1     7   0.33    3.00s    3.74s    0.10s    0.12s  0
+   2    10   0.47    4.31s    4.65s    0.20s    0.25s  0
+   4    12   0.47    7.49s    9.67s    4.25s    5.22s  0
+   8    16   0.38   17.48s   24.29s   12.95s   17.93s  0
+
+(p95 over fewer than 20 requests is close to the slowest one; use --duration for more.)
+```
+
+How to read it:
+
+- **1 → 2 concurrent requests:** TTFT (time to the first token, which is what a chat user feels) stays low, because Ollama serves `OLLAMA_NUM_PARALLEL=2` requests at once. The two share the same CPU, though, so each gets slower and throughput rises only about 40%, not 2×.
+- **2 → 8:** throughput stays flat while latency and TTFT climb, because the extra requests are **waiting in a queue**, not computing.
+- **Why it matters for scaling:** a CPU-based autoscaler sees the same busy CPU at 2 and at 8, so model serving scales on **queue depth** instead (for example vLLM's `num_requests_waiting`).
+
+Options: `uv run python scripts/load_test.py --concurrency 1,2,4 --duration 30 --max-tokens 32 --model chat-small`. TTFT is measured as the time to the first streamed chunk with non-empty `delta.content`. It's a closed-loop test (each worker waits for its answer before sending the next), which is gentler than real traffic.
+
 ---
 
 ## Troubleshooting
@@ -340,6 +547,8 @@ curl -u "$LANGFUSE_PUBLIC_KEY:$LANGFUSE_SECRET_KEY" \
 | `langfuse-web` in `CrashLoopBackOff` right after install, logs say `lookup langfuse-clickhouse-headless ... no such host` | ClickHouse isn't up yet. | Wait 1–2 minutes. If it persists, check `kubectl get clickhousecluster,keepercluster -n observability`. |
 | No traces in Langfuse | Wrong callback, wrong host, or wrong keys. | Use `callbacks: ["langfuse_otel"]`; check `LANGFUSE_OTEL_HOST` points at `langfuse-web.observability.svc.cluster.local:3000` and that the `litellm-langfuse` Secret matches `.env`. |
 | `GET /api/public/traces` says "not available ... v4 events_only mode" | Expected in Langfuse v4. | Use `/api/public/v2/observations`. |
+| A demo says `Gateway not reachable` | `make pf` isn't running, or it's still reattaching after a redeploy (it can briefly land on a pod that is shutting down and never answers). | Start `make pf`; the scripts wait up to 90 s. If it persists, `make pf-stop` then `make pf`. |
+| `make demo-replicas` was killed (Ctrl-C twice, closed terminal) and 2 replicas are left running | The script restores the gateway on errors and a single Ctrl-C, but not if it's killed outright. | `make litellm` restores the normal single-replica config. |
 | `connection refused` on `localhost:4000` or `:3000` | The port-forward died, often after a pod restart. | Keep `make pf` running; it reconnects automatically. |
 | `kubectl top` shows tiny or old numbers | metrics-server samples lag by up to a minute. | Wait a minute and check again. |
 | Odd `kubectl` errors or warnings | The `kubectl` client is more than one minor version away from the cluster. | `brew install kubernetes-cli` and check that `which kubectl` points to Homebrew. |

@@ -12,7 +12,8 @@ LOAD_ENV := set -a && . ./.env && set +a
 APPLY := kubectl apply -f -
 
 .PHONY: preflight cluster nuke up down namespaces secrets ollama postgres valkey litellm \
-	cert-manager clickhouse-operator langfuse pf pf-stop bootstrap smoke
+	cert-manager clickhouse-operator langfuse pf pf-stop bootstrap smoke \
+	demo-fallback demo-limits demo-cache demo-replicas demo-chaos load
 
 preflight:
 	$(PY) scripts/preflight.py
@@ -88,9 +89,12 @@ valkey:
 	kubectl -n llm rollout status deployment/valkey --timeout=120s
 
 # The chart's migrations Job is a pre-install hook, so Postgres must be up first.
+# LITELLM_ARGS adds one-off overrides, e.g. `make litellm LITELLM_ARGS="--set gateway.replicaCount=2"`
+# (scripts/demo_replicas.py uses it to switch shared state off and on).
 litellm:
 	helm upgrade --install litellm oci://ghcr.io/berriai/litellm/chart/litellm \
-		--version $(LITELLM_CHART_VERSION) -n llm -f infra/litellm/values.yaml --wait --timeout 10m
+		--version $(LITELLM_CHART_VERSION) -n llm -f infra/litellm/values.yaml --wait --timeout 10m \
+		$(LITELLM_ARGS)
 	$(PY) scripts/wait_ready.py llm
 
 # Cluster-wide prerequisites of the Langfuse chart: the ClickHouse operator renders
@@ -131,3 +135,23 @@ bootstrap:
 
 smoke:
 	$(PY) scripts/smoke_test.py
+
+# Phase 4 demos: each prints a "What you just saw" summary. All need `make pf` running.
+demo-fallback:
+	$(PY) scripts/demo_fallback.py
+
+demo-limits:
+	$(PY) scripts/demo_limits.py
+
+demo-cache:
+	$(PY) scripts/demo_cache.py
+
+# Redeploys the gateway twice (2 replicas without, then with Valkey) and restores 1 replica.
+demo-replicas:
+	$(PY) scripts/demo_replicas.py
+
+demo-chaos:
+	$(PY) scripts/demo_chaos.py
+
+load:
+	$(PY) scripts/load_test.py --concurrency 1,2,4,8 --duration 20
