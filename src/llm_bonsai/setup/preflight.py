@@ -67,7 +67,6 @@ def kube_contexts() -> tuple[list[str], str | None]:
 
 
 def run() -> None:
-    """Check the host (RAM, Docker VM, disk, tools) and recommend how to create the cluster. Read-only."""
     ram_gib = int(output_of(["sysctl", "-n", "hw.memsize"]) or 0) / GIB
     chip = output_of(["sysctl", "-n", "machdep.cpu.brand_string"]) or "unknown"
     free_disk_gib = shutil.disk_usage(Path.home()).free / GIB

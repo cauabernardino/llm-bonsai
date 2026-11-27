@@ -8,11 +8,13 @@ where that time went. The CLI's port-forward reattaches to the replacement pod b
 import asyncio
 import time
 from dataclasses import dataclass
-from typing import Any
 
-from llm_bonsai import gateway, kube, report
+from llm_bonsai import report
+from llm_bonsai.catalog import GATEWAY, SUPPORT_BOT
+from llm_bonsai.clients.gateway import Gateway
+from llm_bonsai.lab import Lab
+from llm_bonsai.models import Attempt
 from llm_bonsai.probe import load
-from llm_bonsai.probe.load import Result
 
 CONCURRENCY = 2
 DURATION_S = 90
@@ -29,7 +31,15 @@ class Damage:
     recovered_at: float | None  # first success after the last failure, seconds since start
 
 
-def assess(results: list[Result], killed_at: float) -> Damage:
+@dataclass(frozen=True)
+class ChaosRun:
+    attempts: list[Attempt]
+    pods_before: int
+    killed_at: float  # seconds since the run began
+    ready_at: float  # when a replacement pod was Ready
+
+
+def assess(results: list[Attempt], killed_at: float) -> Damage:
     failed = [r for r in results if r.error]
     last_failure = max((r.started for r in failed), default=killed_at)
     successes_after = [r.started for r in results if r.error is None and r.started > last_failure]
@@ -41,36 +51,30 @@ def assess(results: list[Result], killed_at: float) -> Damage:
     )
 
 
-def is_ready(pod: dict[str, Any]) -> bool:
-    conditions = pod.get("status", {}).get("conditions", [])
-    return any(c["type"] == "Ready" and c["status"] == "True" for c in conditions)
-
-
-async def wait_for_replacement(killed: str, t0: float) -> float:
+async def wait_for_replacement(gateway: Gateway, killed: str, t0: float) -> float:
     """Seconds since t0 at which a gateway pod other than `killed` is Ready."""
     while True:
-        pods = await asyncio.to_thread(kube.gateway_pods)
-        if any(pod["metadata"]["name"] != killed and is_ready(pod) for pod in pods):
+        pods = await asyncio.to_thread(gateway.pods)
+        if any(pod.name != killed and pod.ready for pod in pods):
             return time.perf_counter() - t0
         await asyncio.sleep(0.5)
 
 
-async def kill_during_load() -> tuple[list[Result], int, float, float]:
-    """Returns (every request, gateway pods before the kill, when the pod was deleted, when a replacement was Ready)."""
+async def kill_during_load(lab: Lab) -> ChaosRun:
     t0 = time.perf_counter()
-    traffic = asyncio.create_task(load.generate_load(CONCURRENCY, DURATION_S, max_tokens=32))
+    traffic = asyncio.create_task(load.support_bot_load(lab, max_tokens=32).run(CONCURRENCY, DURATION_S))
     await asyncio.sleep(KILL_AT_S)
-    pods = await asyncio.to_thread(kube.gateway_pods)
-    pod = pods[0]["metadata"]["name"]
+    pods = await asyncio.to_thread(lab.gateway.pods)
+    pod = pods[0].name
     killed_at = time.perf_counter() - t0
-    await asyncio.to_thread(kube.kubectl, "delete", "pod", pod, "--wait=false", namespace="llm")
+    await asyncio.to_thread(lab.kube.kubectl, "delete", "pod", pod, "--wait=false", namespace=GATEWAY.namespace)
     print(f"t={killed_at:5.1f}s  deleted pod {pod}", flush=True)
-    ready_at = await wait_for_replacement(pod, t0)
+    ready_at = await wait_for_replacement(lab.gateway, pod, t0)
     print(f"t={ready_at:5.1f}s  replacement pod Ready", flush=True)
-    return await traffic, len(pods), killed_at, ready_at
+    return ChaosRun(await traffic, len(pods), killed_at, ready_at)
 
 
-def timeline(results: list[Result]) -> None:
+def timeline(results: list[Attempt]) -> None:
     print(f"\nRequests by start time ({BUCKET_S}s buckets):")
     last = max(r.started for r in results)
     for start in range(0, int(last) + 1, BUCKET_S):
@@ -91,21 +95,20 @@ NOT_SHOWN = (
 )
 
 
-def run() -> None:
-    """Delete the gateway pod under load and measure the outage (~2 min)."""
-    gateway.require_gateway()
+def run(lab: Lab) -> None:
+    lab.gateway.require()
     report.header(
-        "support-bot (long-lived key from `llm-bonsai setup teams`)",
+        f"{SUPPORT_BOT.alias} (long-lived key from `llm-bonsai setup teams`)",
         f"{load.PROMPT!r} ({CONCURRENCY} concurrent streams for {DURATION_S}s, max_tokens=32)",
     )
     print(f"A gateway pod gets deleted at t={KILL_AT_S}s.\n")
-    results, pods_before, killed_at, ready_at = asyncio.run(kill_during_load())
-    timeline(results)
-    damage = assess(results, killed_at)
+    measured = asyncio.run(kill_during_load(lab))
+    timeline(measured.attempts)
+    damage = assess(measured.attempts, measured.killed_at)
 
     if not damage.failed:
         report.summary(
-            f"No request failed: {pods_before} gateway pods were Ready, so traffic moved to the survivors. "
+            f"No request failed: {measured.pods_before} gateway pods were Ready, so traffic moved to the survivors. "
             "Run with a single replica to see the outage."
         )
         return
@@ -116,12 +119,13 @@ def run() -> None:
     if damage.recovered_at is None:
         report.summary(
             f"Requests never succeeded again within the {DURATION_S}s run, although a replacement pod was "
-            f"Ready at t={ready_at:.0f}s. Check `kubectl -n llm get pods` and the gateway's logs."
+            f"Ready at t={measured.ready_at:.0f}s. Check `kubectl -n {GATEWAY.namespace} get pods` and the "
+            "gateway's logs."
         )
         return
 
-    outage, startup = damage.recovered_at - killed_at, ready_at - killed_at
-    reattach = damage.recovered_at - ready_at
+    outage, startup = damage.recovered_at - measured.killed_at, measured.ready_at - measured.killed_at
+    reattach = damage.recovered_at - measured.ready_at
     # Readiness is polled (~1s resolution) and requests are timed by when they started, so a
     # gap under a second means "the port-forward picked the new pod up right away".
     if reattach < 1:
@@ -130,7 +134,7 @@ def run() -> None:
         breakdown = f"{startup:.0f}s waiting for the replacement pod + {reattach:.0f}s for the port-forward to reattach"
     print(f"Outage: {outage:.1f}s, {breakdown} (timings ±1s)")
 
-    replicas = "one replica" if pods_before == 1 else f"{pods_before} replicas"
+    replicas = "one replica" if measured.pods_before == 1 else f"{measured.pods_before} replicas"
     cut_off = "1 request was" if damage.cut_off == 1 else f"{damage.cut_off} requests were"
     report.summary(
         f"With {replicas}, deleting a pod was a full outage: {outage:.0f}s with no successful request, "

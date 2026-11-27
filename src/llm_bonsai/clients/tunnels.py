@@ -7,29 +7,17 @@ pod goes away, so a watcher thread restarts it; `restart()` covers the case wher
 stays attached to a pod that is shutting down and never answers.
 """
 
-import atexit
 import socket
 import subprocess
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
 
-from llm_bonsai import kube
+from llm_bonsai.clients.kube import Kube
 from llm_bonsai.errors import LabError
+from llm_bonsai.models import Service
 
 RESTART_DELAY_S = 0.5
-
-
-@dataclass(frozen=True)
-class Service:
-    namespace: str
-    name: str
-    port: int
-
-
-GATEWAY = Service("llm", "litellm", 4000)
-LANGFUSE = Service("observability", "langfuse-web", 3000)
 
 
 def free_local_port() -> int:
@@ -51,9 +39,15 @@ def port_in_use(port: int) -> bool:
 class PortForward:
     """`kubectl port-forward` to one Service, restarted whenever it exits, until closed."""
 
-    def __init__(self, service: Service, local_port: int | None = None) -> None:
+    def __init__(self, kube: Kube, service: Service, local_port: int | None = None) -> None:
         self.service = service
         self.local_port = local_port or free_local_port()
+        self._argv = [
+            *kube.kubectl_argv(service.namespace),
+            "port-forward",
+            f"svc/{service.name}",
+            f"{self.local_port}:{service.port}",
+        ]
         self._process: subprocess.Popen[bytes] | None = None
         self._last_error = ""
         self._closed = threading.Event()
@@ -87,18 +81,12 @@ class PortForward:
             process.wait()
 
     def _keep_forwarding(self) -> None:
-        target = f"svc/{self.service.name}"
-        ports = f"{self.local_port}:{self.service.port}"
         while not self._closed.is_set():
             with tempfile.TemporaryFile() as stderr:
                 with self._lock:
                     if self._closed.is_set():
                         return
-                    self._process = subprocess.Popen(
-                        [*kube.kubectl_cmd(namespace=self.service.namespace), "port-forward", target, ports],
-                        stdout=subprocess.DEVNULL,
-                        stderr=stderr,
-                    )
+                    self._process = subprocess.Popen(self._argv, stdout=subprocess.DEVNULL, stderr=stderr)
                 self._process.wait()
                 stderr.seek(0)
                 lines = stderr.read().decode(errors="replace").strip().splitlines()
@@ -121,49 +109,23 @@ class PortForward:
         )
 
 
-_open: dict[Service, PortForward] = {}
+class Tunnels:
+    """One port-forward per Service, opened on first use and all closed together."""
 
+    def __init__(self, kube: Kube) -> None:
+        self._kube = kube
+        self._open: dict[Service, PortForward] = {}
 
-def forward(service: Service) -> PortForward:
-    """The port-forward to `service`, opened on first use and closed when the process exits."""
-    if service not in _open:
-        tunnel = PortForward(service)
-        tunnel.open()
-        if not _open:
-            atexit.register(close_all)
-        _open[service] = tunnel
-    return _open[service]
-
-
-def url(service: Service) -> str:
-    return forward(service).url
-
-
-def close_all() -> None:
-    while _open:
-        _open.popitem()[1].close()
-
-
-def hold_open_for_browser() -> None:
-    """Forward Langfuse to localhost:3000 and LiteLLM to localhost:4000 until Ctrl-C.
-
-    Fixed ports, unlike the commands' own tunnels: Langfuse's login only works on the
-    URL it was configured with (NEXTAUTH_URL=http://localhost:3000).
-    """
-    pages = [(LANGFUSE, 3000), (GATEWAY, 4000)]
-    busy = [port for _, port in pages if port_in_use(port)]
-    if busy:
-        raise LabError(f"port {' and '.join(map(str, busy))} already in use (an old `kubectl port-forward`?)")
-    tunnels = [PortForward(service, port) for service, port in pages]
-    try:
-        for tunnel in tunnels:
+    def forward(self, service: Service) -> PortForward:
+        if service not in self._open:
+            tunnel = PortForward(self._kube, service)
             tunnel.open()
-        print("Langfuse:   http://localhost:3000     log in with LANGFUSE_INIT_USER_EMAIL / _PASSWORD from .env")
-        print("LiteLLM UI: http://localhost:4000/ui  log in as admin with LITELLM_MASTER_KEY from .env")
-        print("Ctrl-C closes both.", flush=True)
-        threading.Event().wait()
-    except KeyboardInterrupt:
-        print("\nclosed")
-    finally:
-        for tunnel in tunnels:
-            tunnel.close()
+            self._open[service] = tunnel
+        return self._open[service]
+
+    def url(self, service: Service) -> str:
+        return self.forward(service).url
+
+    def close(self) -> None:
+        while self._open:
+            self._open.popitem()[1].close()

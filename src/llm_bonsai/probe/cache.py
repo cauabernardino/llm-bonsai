@@ -13,8 +13,9 @@ from typing import Any
 
 import openai
 
-from llm_bonsai import gateway, report
-from llm_bonsai.config import env
+from llm_bonsai import report
+from llm_bonsai.catalog import CHAT_SMALL, SUPPORT_BOT
+from llm_bonsai.lab import Lab
 
 
 @dataclass(frozen=True)
@@ -50,7 +51,7 @@ REQUESTS = [
 def send(client: openai.OpenAI, prompt: str, request: Request) -> Reply:
     start = time.perf_counter()
     raw = client.chat.completions.with_raw_response.create(
-        model="chat-small",
+        model=CHAT_SMALL,
         messages=[{"role": "user", "content": prompt}],
         extra_body={"cache": {"use-cache": request.use_cache}},
         **request.params,
@@ -84,10 +85,9 @@ def takeaways(first: Reply, repeat: Reply, changed: Reply, skipped: Reply) -> li
     return bullets
 
 
-def run() -> None:
-    """Show a cache hit, an exact-match miss and a request that skips the cache."""
-    gateway.require_gateway()
-    client = gateway.client(env("LITELLM_KEY_SUPPORT_BOT"))
+def run(lab: Lab) -> None:
+    lab.gateway.require()
+    client = lab.gateway.client(lab.env.get(SUPPORT_BOT.env_var))
     prompt = f"Write a haiku about a bonsai tree. (run {uuid.uuid4().hex[:6]})"
     report.header(
         "support-bot (long-lived key from `llm-bonsai setup teams`)",

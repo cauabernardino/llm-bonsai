@@ -15,14 +15,16 @@ import uuid
 from collections import Counter
 from dataclasses import dataclass
 
-from llm_bonsai import gateway, kube, report, tunnels
+from llm_bonsai import report
+from llm_bonsai.catalog import CHAT_SMALL, GATEWAY, PAYMENTS_AI
 from llm_bonsai.errors import LabError
-from llm_bonsai.setup import infra
+from llm_bonsai.lab import Lab
 
 RPM_LIMIT = 3
 BURST = 16
 CLIENT_IMAGE = "curlimages/curl:8.23.0"
 PROMPT = "hi"
+SERVICE_URL = f"http://{GATEWAY.name}.{GATEWAY.namespace}.svc.cluster.local:{GATEWAY.port}"
 ACCESS_LOG = re.compile(r'"POST /v1/chat/completions HTTP/1\.1" (\d{3})')
 
 NO_SHARED_STATE = [
@@ -39,42 +41,42 @@ class Outcome:
     per_pod: str  # allowed per pod, e.g. "3 + 3"
 
 
-def wait_for_old_pods_gone(timeout_s: float = 120) -> None:
+def wait_for_old_pods_gone(lab: Lab, timeout_s: float = 120) -> None:
     """`helm --wait` returns once the new pods are Ready, while old ones may still be
     shutting down. A port-forward reattaching at that moment can land on a dying pod
     that accepts connections but never answers, so wait until only live pods remain."""
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        if not any(pod["metadata"].get("deletionTimestamp") for pod in kube.gateway_pods(include_terminating=True)):
+        if not any(pod.terminating for pod in lab.gateway.pods(include_terminating=True)):
             return
         time.sleep(2)
     raise LabError("old gateway pods still terminating")
 
 
-def deploy(description: str, set_values: list[str]) -> None:
+def deploy(lab: Lab, description: str, set_values: list[str]) -> None:
     print(f"  redeploying the gateway: {description} (helm upgrade, ~1 min)…", flush=True)
-    infra.install_litellm(set_values, quiet=True)
-    wait_for_old_pods_gone()
+    lab.installer.install_litellm(set_values, quiet=True)
+    wait_for_old_pods_gone(lab)
     # The CLI's own port-forward was pinned to a pod that is now gone; reconnect to a live one.
-    tunnels.forward(tunnels.GATEWAY).restart()
-    gateway.require_gateway(wait_s=90)
-    deployment = kube.kubectl_json("get", "deploy", "litellm", namespace="llm")
+    lab.gateway.reconnect()
+    lab.gateway.require(wait_s=90)
+    deployment = lab.kube.kubectl_json("get", "deploy", GATEWAY.name, namespace=GATEWAY.namespace)
     env = deployment["spec"]["template"]["spec"]["containers"][0].get("env", [])
     redis = next((e["value"] for e in env if e["name"] == "REDIS_HOST"), None)
     print(f"  gateway: {deployment['status']['readyReplicas']} ready replica(s), REDIS_HOST={redis or 'unset'}")
 
 
-def burst_from_inside(key: str) -> list[str]:
+def burst_from_inside(lab: Lab, key: str) -> list[str]:
     """Fire BURST requests from a throwaway in-cluster pod; one new connection each,
     so the Service picks a pod per request. Returns the HTTP status codes.
 
     The key goes in on stdin (`kubectl run -i`), never into the pod spec or argv.
     """
-    body = json.dumps({"model": "chat-small", "max_tokens": 1, "messages": [{"role": "user", "content": PROMPT}]})
+    body = json.dumps({"model": CHAT_SMALL, "max_tokens": 1, "messages": [{"role": "user", "content": PROMPT}]})
     script = (
         f"read -r KEY; for i in $(seq 1 {BURST}); do curl -s -o /dev/null -w '%{{http_code}}\\n' "
         "-H 'Connection: close' -H \"Authorization: Bearer $KEY\" -H 'Content-Type: application/json' "
-        f"-d '{body}' http://litellm.llm.svc.cluster.local:4000/v1/chat/completions; done"
+        f"-d '{body}' {SERVICE_URL}/v1/chat/completions; done"
     )
     container = {
         "name": "burst",
@@ -85,29 +87,32 @@ def burst_from_inside(key: str) -> list[str]:
         "stdinOnce": True,
         "resources": {"requests": {"cpu": "10m", "memory": "16Mi"}, "limits": {"cpu": "200m", "memory": "64Mi"}},
     }
-    output = kube.kubectl(
+    output = lab.kube.kubectl(
         "run", f"replicas-probe-{uuid.uuid4().hex[:6]}", "--rm", "-i", "--quiet", "--restart=Never",
         f"--image={CLIENT_IMAGE}", f"--overrides={json.dumps({'spec': {'containers': [container]}})}",
-        namespace="llm", stdin=f"{key}\n",
+        namespace=GATEWAY.namespace, stdin=f"{key}\n",
     )  # fmt: skip
     return [line for line in output.split() if line.isdigit()]
 
 
-def per_pod_split(since_s: int) -> dict[str, Counter[str]]:
+def per_pod_split(lab: Lab, since_s: int) -> dict[str, Counter[str]]:
     """Count the burst's responses in each pod's access log (uvicorn logs every request)."""
     return {
-        pod: Counter(ACCESS_LOG.findall(kube.kubectl("logs", pod, f"--since={since_s}s", namespace="llm")))
-        for pod in (p["metadata"]["name"] for p in kube.gateway_pods())
+        pod.name: Counter(
+            ACCESS_LOG.findall(lab.kube.kubectl("logs", pod.name, f"--since={since_s}s", namespace=GATEWAY.namespace))
+        )
+        for pod in lab.gateway.pods()
     }
 
 
-def scenario(title: str, description: str, set_values: list[str]) -> Outcome:
+def scenario(lab: Lab, title: str, description: str, set_values: list[str]) -> Outcome:
     print(title)
-    deploy(description, set_values)
-    with gateway.temporary_key("probe-replicas", team="payments-ai", models=["chat-small"], rpm_limit=RPM_LIMIT) as key:
+    deploy(lab, description, set_values)
+    limits = {"models": [CHAT_SMALL], "rpm_limit": RPM_LIMIT}
+    with lab.gateway.temporary_key("probe-replicas", team=PAYMENTS_AI.alias, **limits) as key:
         start = time.monotonic()
-        codes = burst_from_inside(key)
-        split = per_pod_split(int(time.monotonic() - start) + 5)
+        codes = burst_from_inside(lab, key)
+        split = per_pod_split(lab, int(time.monotonic() - start) + 5)
     allowed = codes.count("200")
     print(f"  {BURST} requests through the Service → {allowed} × HTTP 200, {codes.count('429')} × HTTP 429")
     for pod, counts in split.items():
@@ -146,21 +151,23 @@ def takeaways(without: Outcome, with_valkey: Outcome) -> list[str]:
     ]
 
 
-def run(keep_replicas: bool) -> None:
-    gateway.require_gateway()
+def run(lab: Lab, keep_replicas: bool) -> None:
+    lab.gateway.require()
     report.header(
-        f"throwaway key per scenario, team payments-ai: {RPM_LIMIT} requests/min (deleted at the end)",
+        f"throwaway key per scenario, team {PAYMENTS_AI.alias}: {RPM_LIMIT} requests/min (deleted at the end)",
         f"{PROMPT!r} × {BURST} (max_tokens=1), sent from a pod inside the cluster",
     )
     try:
-        without = scenario("Scenario 1: 2 replicas, no Valkey", "2 replicas, Valkey off", NO_SHARED_STATE)
-        with_valkey = scenario("Scenario 2: 2 replicas, Valkey for shared state", "2 replicas, Valkey on", WITH_VALKEY)
+        without = scenario(lab, "Scenario 1: 2 replicas, no Valkey", "2 replicas, Valkey off", NO_SHARED_STATE)
+        with_valkey = scenario(
+            lab, "Scenario 2: 2 replicas, Valkey for shared state", "2 replicas, Valkey on", WITH_VALKEY
+        )
     finally:
         if keep_replicas:
             print("Leaving 2 replicas running (--keep-replicas).")
         else:
             print("Restoring the normal gateway")
-            deploy("1 replica, Valkey on", [])
+            deploy(lab, "1 replica, Valkey on", [])
 
     report.summary(
         *takeaways(without, with_valkey),

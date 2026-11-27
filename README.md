@@ -132,17 +132,22 @@ infra/
   cert-manager/values.yaml
   langfuse/values.yaml    Helm values for the Langfuse chart, sized for a laptop
 src/llm_bonsai/           the Python package behind the `llm-bonsai` command
-  cli.py                  the root command: setup / probe / teardown
-  config.py               repo paths, .env lookup, the kube context
-  tunnels.py              port-forwards that live as long as the command that needs them
-  kube.py                 kubectl/helm wrappers; Chart = one pinned Helm release
-  gateway.py              gateway clients and throwaway virtual keys
-  traces.py               reading generations back from Langfuse
+  cli.py                  the root command: setup / probe / ui / teardown
+  lab.py                  Lab: the clients one command uses, closed (with its port-forwards) when it ends
+  config.py               LabConfig (repo root, kube context) and EnvFile (.env, the only source of credentials)
+  catalog.py              what the lab consists of: namespaces, Services, model groups, teams
+  models.py               shared records: Chart, Service, Team, GatewayPod, Generation, Attempt
   report.py               the output conventions every probe follows
+  clients/                how the package reaches the lab
+    shell.py              subprocesses, with failures as LabErrors
+    kube.py               Kube: kubectl/helm pinned to the lab's context
+    tunnels.py            port-forwards that live as long as the command that needs them
+    gateway.py            Gateway (traffic, health, throwaway keys) and GatewayAdmin (teams, keys)
+    langfuse.py           Langfuse: reading a run's generations back
   setup/                  `llm-bonsai setup …`
     preflight.py          machine checks and cluster recommendation
     credentials.py        random dev secrets into .env, then into Kubernetes Secrets
-    infra.py              the cluster and every install step, with pinned chart versions
+    infra.py              pinned charts, the cluster, and Installer (one method per install step)
     teams.py              teams + virtual keys
   probe/                  `llm-bonsai probe …`
     smoke.py              end-to-end gateway check, including traces in Langfuse

@@ -2,6 +2,7 @@ from typing import Annotated
 
 import typer
 
+from llm_bonsai.lab import Lab
 from llm_bonsai.setup import infra, preflight, teams
 
 app = typer.Typer(
@@ -9,28 +10,88 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
-app.command("preflight")(preflight.run)
-app.command("cluster")(infra.create_cluster)
-app.command("namespaces")(infra.install_namespaces)
-app.command("secrets")(infra.install_secrets)
-app.command("ollama")(infra.install_ollama)
-app.command("postgres")(infra.install_postgres)
-app.command("valkey")(infra.install_valkey)
-app.command("cert-manager")(infra.install_cert_manager)
-app.command("clickhouse-operator")(infra.install_clickhouse_operator)
-app.command("langfuse")(infra.install_langfuse)
+
+@app.command("preflight")
+def preflight_command() -> None:
+    """Check the host (RAM, Docker VM, disk, tools) and recommend how to create the cluster. Read-only."""
+    preflight.run()
+
+
+@app.command("cluster")
+def cluster() -> None:
+    """Start minikube with 6 CPUs, 14 GiB and 40 GB of disk, plus metrics-server."""
+    infra.create_cluster()
+
+
+@app.command("namespaces")
+def namespaces(ctx: typer.Context) -> None:
+    """Create the llm and observability namespaces."""
+    Lab.of(ctx).installer.install_namespaces()
+
+
+@app.command("secrets")
+def secrets(ctx: typer.Context) -> None:
+    """Fill .env with random dev secrets (keeping existing ones) and apply them as Kubernetes Secrets."""
+    Lab.of(ctx).installer.install_secrets()
+
+
+@app.command("ollama")
+def ollama(ctx: typer.Context) -> None:
+    """Install Ollama and pull qwen2.5:0.5b and nomic-embed-text (first run: a few minutes)."""
+    Lab.of(ctx).installer.install_ollama()
+
+
+@app.command("postgres")
+def postgres(ctx: typer.Context) -> None:
+    """Install the gateway's Postgres (keys, teams, spend)."""
+    Lab.of(ctx).installer.install_postgres()
+
+
+@app.command("valkey")
+def valkey(ctx: typer.Context) -> None:
+    """Install Valkey, the gateway's shared cache and rate-limit store."""
+    Lab.of(ctx).installer.install_valkey()
+
+
+@app.command("cert-manager")
+def cert_manager(ctx: typer.Context) -> None:
+    """Install cert-manager, a prerequisite of the ClickHouse operator."""
+    Lab.of(ctx).installer.install_cert_manager()
+
+
+@app.command("clickhouse-operator")
+def clickhouse_operator(ctx: typer.Context) -> None:
+    """Install the ClickHouse operator, a prerequisite of the Langfuse chart."""
+    Lab.of(ctx).installer.install_clickhouse_operator()
+
+
+@app.command("langfuse")
+def langfuse(ctx: typer.Context) -> None:
+    """Install Langfuse v4 with ClickHouse, Postgres, Valkey and SeaweedFS (first run: up to 15 min)."""
+    Lab.of(ctx).installer.install_langfuse()
 
 
 @app.command("litellm")
 def litellm(
+    ctx: typer.Context,
     set_values: Annotated[
         list[str] | None,
         typer.Option("--set", metavar="KEY=VALUE", help="One-off Helm override, e.g. gateway.replicaCount=2."),
     ] = None,
 ) -> None:
     """Install the LiteLLM gateway (needs Postgres and Valkey). Re-run without --set to undo overrides."""
-    infra.install_litellm(set_values or [])
+    Lab.of(ctx).installer.install_litellm(set_values or [])
 
 
-app.command("all")(infra.install_all)
-app.command("teams")(teams.ensure_teams)
+@app.command("all")
+def all_steps(ctx: typer.Context) -> None:
+    """Run every install step, namespaces through litellm, in order (not `cluster` or `teams`)."""
+    Lab.of(ctx).installer.install_all()
+
+
+@app.command("teams")
+def teams_command(ctx: typer.Context) -> None:
+    """Create the demo teams and one virtual key each; saves the keys to .env. Safe to re-run."""
+    lab = Lab.of(ctx)
+    with lab.gateway.admin() as admin:
+        teams.ensure_teams(admin, lab.env)

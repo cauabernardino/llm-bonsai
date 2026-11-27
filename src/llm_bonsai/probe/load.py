@@ -16,66 +16,73 @@ from dataclasses import dataclass
 
 import httpx
 
-from llm_bonsai import gateway, report
-from llm_bonsai.config import env
+from llm_bonsai import report
+from llm_bonsai.catalog import CHAT_SMALL, SUPPORT_BOT
+from llm_bonsai.lab import Lab
+from llm_bonsai.models import Attempt
 
 PROMPT = "Explain in three sentences why the sky is blue."
 # A failing request returns instantly; pause so a dead gateway doesn't become a hot loop.
 ERROR_BACKOFF_S = 0.25
 
 
-@dataclass(frozen=True)
-class Result:
-    started: float  # seconds since the run began
-    latency: float
-    ttft: float | None
-    error: str | None
+class LoadGenerator:
+    """Closed-loop streaming traffic to one model with one key."""
+
+    def __init__(self, base_url: str, key: str, model: str = CHAT_SMALL, max_tokens: int = 64) -> None:
+        self.base_url = base_url
+        self.model = model
+        self.max_tokens = max_tokens
+        self._key = key
+
+    async def run(self, concurrency: int, duration: float) -> list[Attempt]:
+        """Run `concurrency` workers for `duration` seconds and return every attempt."""
+        attempts: list[Attempt] = []
+        t0 = time.perf_counter()
+
+        async def worker(client: httpx.AsyncClient) -> None:
+            while (begin := time.perf_counter()) - t0 < duration:
+                try:
+                    ttft, error = await self._one_request(client)
+                except httpx.HTTPError as exc:
+                    ttft, error = None, type(exc).__name__
+                attempts.append(Attempt(begin - t0, time.perf_counter() - begin, ttft, error))
+                if error:
+                    await asyncio.sleep(ERROR_BACKOFF_S)
+
+        async with httpx.AsyncClient(
+            base_url=self.base_url,
+            headers={"Authorization": f"Bearer {self._key}"},
+            timeout=httpx.Timeout(120, connect=5),
+        ) as client:
+            await asyncio.gather(*(worker(client) for _ in range(concurrency)))
+        return attempts
+
+    async def _one_request(self, client: httpx.AsyncClient) -> tuple[float | None, str | None]:
+        """Stream one completion; returns (ttft, error)."""
+        body = {
+            "model": self.model,
+            "stream": True,
+            "max_tokens": self.max_tokens,
+            "messages": [{"role": "user", "content": PROMPT}],
+        }
+        start = time.perf_counter()
+        ttft = None
+        async with client.stream("POST", "/v1/chat/completions", json=body) as response:
+            if response.status_code != 200:
+                await response.aread()
+                return None, f"HTTP {response.status_code}"
+            async for line in response.aiter_lines():
+                if not line.startswith("data: ") or line == "data: [DONE]":
+                    continue
+                choices = json.loads(line.removeprefix("data: ")).get("choices") or [{}]
+                if ttft is None and choices[0].get("delta", {}).get("content"):
+                    ttft = time.perf_counter() - start
+        return ttft, None
 
 
-async def one_request(client: httpx.AsyncClient, model: str, max_tokens: int) -> tuple[float | None, str | None]:
-    """Stream one completion; returns (ttft, error)."""
-    body = {"model": model, "stream": True, "max_tokens": max_tokens, "messages": [{"role": "user", "content": PROMPT}]}
-    start = time.perf_counter()
-    ttft = None
-    async with client.stream("POST", "/v1/chat/completions", json=body) as response:
-        if response.status_code != 200:
-            await response.aread()
-            return None, f"HTTP {response.status_code}"
-        async for line in response.aiter_lines():
-            if not line.startswith("data: ") or line == "data: [DONE]":
-                continue
-            choices = json.loads(line.removeprefix("data: ")).get("choices") or [{}]
-            if ttft is None and choices[0].get("delta", {}).get("content"):
-                ttft = time.perf_counter() - start
-    return ttft, None
-
-
-async def generate_load(
-    concurrency: int, duration: float, model: str = "chat-small", max_tokens: int = 64
-) -> list[Result]:
-    """Run `concurrency` workers for `duration` seconds and return every attempt (support-bot key)."""
-    key = env("LITELLM_KEY_SUPPORT_BOT")
-    url = gateway.base_url()
-    results: list[Result] = []
-    t0 = time.perf_counter()
-
-    async def worker(client: httpx.AsyncClient) -> None:
-        while (begin := time.perf_counter()) - t0 < duration:
-            try:
-                ttft, error = await one_request(client, model, max_tokens)
-            except httpx.HTTPError as exc:
-                ttft, error = None, type(exc).__name__
-            results.append(Result(begin - t0, time.perf_counter() - begin, ttft, error))
-            if error:
-                await asyncio.sleep(ERROR_BACKOFF_S)
-
-    async with httpx.AsyncClient(
-        base_url=url,
-        headers={"Authorization": f"Bearer {key}"},
-        timeout=httpx.Timeout(120, connect=5),
-    ) as client:
-        await asyncio.gather(*(worker(client) for _ in range(concurrency)))
-    return results
+def support_bot_load(lab: Lab, model: str = CHAT_SMALL, max_tokens: int = 64) -> LoadGenerator:
+    return LoadGenerator(lab.gateway.base_url, lab.env.get(SUPPORT_BOT.env_var), model, max_tokens)
 
 
 def percentile(values: Sequence[float], pct: int) -> float | None:
@@ -101,7 +108,7 @@ class Level:
     errors: Counter[str]
 
 
-def measure(concurrency: int, results: list[Result]) -> Level:
+def measure(concurrency: int, results: list[Attempt]) -> Level:
     ok = [r for r in results if r.error is None]
     # Requests in flight at the deadline still finish, so the run lasts longer than
     # --duration; divide by the real wall time or high concurrency looks faster than it is.
@@ -140,7 +147,7 @@ def row(level: Level) -> str:
 
 
 LEGEND = "lat = time to the full answer, ttft = time to first token; p50 = median, p95 = 95th percentile"
-SERVER_NAME = {"chat-small": "Ollama"}  # anything else is described generically
+SERVER_NAME = {CHAT_SMALL: "Ollama"}  # anything else is described generically
 
 
 def takeaways(levels: list[Level], model: str) -> list[str]:
@@ -148,7 +155,7 @@ def takeaways(levels: list[Level], model: str) -> list[str]:
     server = SERVER_NAME.get(model, "the model server")
     by_concurrency = {level.concurrency: level for level in levels}
     bullets = []
-    if model == "chat-small" and 1 in by_concurrency and 2 in by_concurrency:
+    if model == CHAT_SMALL and 1 in by_concurrency and 2 in by_concurrency:
         one, two = by_concurrency[1], by_concurrency[2]
         assert one.ttft50 is not None and two.ttft50 is not None and one.p50 is not None and two.p50 is not None
         if two.ttft50 <= max(2 * one.ttft50, 0.5):
@@ -185,11 +192,11 @@ def takeaways(levels: list[Level], model: str) -> list[str]:
     return bullets
 
 
-def run(levels: list[int], duration: float, model: str, max_tokens: int) -> None:
-    """Sweep the concurrency levels and explain where the time went."""
-    gateway.require_gateway()
+def run(lab: Lab, levels: list[int], duration: float, model: str, max_tokens: int) -> None:
+    lab.gateway.require()
+    generator = support_bot_load(lab, model, max_tokens)
     report.header(
-        "support-bot (long-lived key from `llm-bonsai setup teams`)",
+        f"{SUPPORT_BOT.alias} (long-lived key from `llm-bonsai setup teams`)",
         f"{PROMPT!r} (every request, streamed, max_tokens={max_tokens})",
     )
     print(f"{model}, {duration:.0f}s per concurrency level")
@@ -197,7 +204,7 @@ def run(levels: list[int], duration: float, model: str, max_tokens: int) -> None
     print(HEADER)
     measured = []
     for concurrency in levels:
-        results = asyncio.run(generate_load(concurrency, duration, model, max_tokens))
+        results = asyncio.run(generator.run(concurrency, duration))
         measured.append(measure(concurrency, results))
         print(row(measured[-1]), flush=True)
 

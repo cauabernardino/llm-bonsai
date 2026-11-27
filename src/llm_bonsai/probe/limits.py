@@ -11,8 +11,10 @@ from datetime import UTC, datetime
 
 import openai
 
-from llm_bonsai import gateway, report
+from llm_bonsai import report
+from llm_bonsai.catalog import CHAT_SMALL, PAYMENTS_AI
 from llm_bonsai.errors import LabError
+from llm_bonsai.lab import Lab
 
 RPM_LIMIT = 3
 BUDGET = 0.05
@@ -72,7 +74,7 @@ def rate_limit_part(client: openai.OpenAI) -> RateLimitResult:
     for n in range(1, QUICK_REQUESTS + 1):
         try:
             raw = client.chat.completions.with_raw_response.create(
-                model="chat-small", max_tokens=1, messages=[{"role": "user", "content": QUICK_PROMPT}]
+                model=CHAT_SMALL, max_tokens=1, messages=[{"role": "user", "content": QUICK_PROMPT}]
             )
         except openai.RateLimitError as error:
             if not limited:
@@ -97,7 +99,7 @@ def budget_part(client: openai.OpenAI, spent: float) -> BudgetResult:
     for n in range(1, MAX_BUDGET_REQUESTS + 1):
         try:
             raw = client.chat.completions.with_raw_response.create(
-                model="chat-small", max_tokens=20, messages=[{"role": "user", "content": LONG_PROMPT}]
+                model=CHAT_SMALL, max_tokens=20, messages=[{"role": "user", "content": LONG_PROMPT}]
             )
         except openai.RateLimitError as error:
             wait_for_window(seconds_until_reset(str(error), datetime.now(UTC)))
@@ -153,24 +155,23 @@ def takeaways(quick: RateLimitResult, budget: BudgetResult, recorded: float) -> 
     return bullets
 
 
-def run() -> None:
-    """Hit a 3 requests/minute limit, then spend through a $0.05 budget (~2 min: waits out the window)."""
-    gateway.require_gateway()
+def run(lab: Lab) -> None:
+    lab.gateway.require()
     report.header(
-        f"throwaway key, team payments-ai: {RPM_LIMIT} requests/min, ${BUDGET} budget (deleted at the end)",
+        f"throwaway key, team {PAYMENTS_AI.alias}: {RPM_LIMIT} requests/min, ${BUDGET} budget (deleted at the end)",
         f"part 1 {QUICK_PROMPT!r} (max_tokens=1) · part 2 a {len(LONG_PROMPT)}-char refund policy "
         f"(max_tokens=20, ~$0.04 each):\n        {LONG_PROMPT[:90]}…",
     )
-    with gateway.temporary_key(
-        "probe-limits", team="payments-ai", models=["chat-small"], rpm_limit=RPM_LIMIT, max_budget=BUDGET
+    with lab.gateway.temporary_key(
+        "probe-limits", team=PAYMENTS_AI.alias, models=[CHAT_SMALL], rpm_limit=RPM_LIMIT, max_budget=BUDGET
     ) as key:
-        client = gateway.client(key)
+        client = lab.gateway.client(key)
         quick = rate_limit_part(client)
         if quick.reset_in:
             wait_for_window(quick.reset_in)
         budget = budget_part(client, quick.spent)
-        with gateway.admin() as api:
-            recorded = float(api.get("/key/info", params={"key": key}).json()["info"]["spend"])
+        with lab.gateway.admin() as admin:
+            recorded = admin.key_spend(key)
 
     print(f"\nSpend, summed from x-litellm-response-cost headers: ${budget.spent:.4f}")
     print(f"Spend in Postgres (/key/info) right now:            ${recorded:.4f}")

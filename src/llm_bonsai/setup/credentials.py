@@ -4,14 +4,10 @@ import base64
 import json
 import secrets
 from collections.abc import Callable
-from pathlib import Path
 from typing import Any
 
-from dotenv import dotenv_values, set_key
-
-from llm_bonsai import kube
-from llm_bonsai.config import ENV_FILE
-from llm_bonsai.errors import LabError
+from llm_bonsai.catalog import LLM_NAMESPACE, OBSERVABILITY_NAMESPACE
+from llm_bonsai.config import EnvFile
 
 
 def password() -> str:
@@ -40,20 +36,6 @@ GENERATORS: dict[str, Callable[[], str]] = {
 }
 
 
-def fill_env_file(path: Path = ENV_FILE) -> list[str]:
-    """Add the missing secrets to .env and return their names.
-
-    Existing values are kept: rotating a database password after the database was
-    initialised would lock the app out.
-    """
-    path.touch(mode=0o600)
-    existing = dotenv_values(path)
-    added = [name for name in GENERATORS if not existing.get(name)]
-    for name in added:
-        set_key(path, name, GENERATORS[name]())
-    return added
-
-
 def secret(name: str, namespace: str, data: dict[str, str]) -> dict[str, Any]:
     encoded = {key: base64.b64encode(value.encode()).decode() for key, value in data.items()}
     return {
@@ -65,19 +47,11 @@ def secret(name: str, namespace: str, data: dict[str, str]) -> dict[str, Any]:
     }
 
 
-def kubernetes_secrets(path: Path = ENV_FILE) -> list[dict[str, Any]]:
+def kubernetes_secrets(env: EnvFile) -> list[dict[str, Any]]:
     """The lab's Secrets, built from .env alone (never from shell variables)."""
-    values = dotenv_values(path)
-
-    def env(name: str) -> str:
-        value = values.get(name)
-        if not value:
-            raise LabError(f"{name} missing from {path.name}")
-        return value
-
-    db_password = env("LANGFUSE_DB_PASSWORD")
-    redis_password = env("LANGFUSE_REDIS_PASSWORD")
-    s3_password = env("LANGFUSE_S3_PASSWORD")
+    db_password = env.get("LANGFUSE_DB_PASSWORD")
+    redis_password = env.get("LANGFUSE_REDIS_PASSWORD")
+    s3_password = env.get("LANGFUSE_S3_PASSWORD")
     # SeaweedFS reads its S3 identities from this JSON; Langfuse signs requests with the same pair.
     seaweedfs_identities = {
         "identities": [
@@ -89,46 +63,40 @@ def kubernetes_secrets(path: Path = ENV_FILE) -> list[dict[str, Any]]:
         ]
     }
     return [
-        secret("litellm-master-key", "llm", {"master-key": env("LITELLM_MASTER_KEY")}),
-        secret("litellm-db", "llm", {"username": "litellm", "password": env("LITELLM_DB_PASSWORD")}),
+        secret("litellm-master-key", LLM_NAMESPACE, {"master-key": env.get("LITELLM_MASTER_KEY")}),
+        secret("litellm-db", LLM_NAMESPACE, {"username": "litellm", "password": env.get("LITELLM_DB_PASSWORD")}),
         secret(
             "litellm-langfuse",
-            "llm",
+            LLM_NAMESPACE,
             {
-                "LANGFUSE_PUBLIC_KEY": env("LANGFUSE_PUBLIC_KEY"),
-                "LANGFUSE_SECRET_KEY": env("LANGFUSE_SECRET_KEY"),
+                "LANGFUSE_PUBLIC_KEY": env.get("LANGFUSE_PUBLIC_KEY"),
+                "LANGFUSE_SECRET_KEY": env.get("LANGFUSE_SECRET_KEY"),
             },
         ),
         # One Secret for the whole Langfuse chart: its subcharts each read their own keys.
         secret(
             "langfuse",
-            "observability",
+            OBSERVABILITY_NAMESPACE,
             {
-                "salt": env("LANGFUSE_SALT"),
-                "encryption-key": env("LANGFUSE_ENCRYPTION_KEY"),
-                "nextauth-secret": env("LANGFUSE_NEXTAUTH_SECRET"),
+                "salt": env.get("LANGFUSE_SALT"),
+                "encryption-key": env.get("LANGFUSE_ENCRYPTION_KEY"),
+                "nextauth-secret": env.get("LANGFUSE_NEXTAUTH_SECRET"),
                 "postgresql-password": db_password,
                 "POSTGRES_USER": "postgres",
                 "POSTGRES_PASSWORD": db_password,
                 "POSTGRES_DB": "langfuse",
                 "USERDB_USER": "langfuse",
                 "USERDB_PASSWORD": db_password,
-                "clickhouse-password": env("LANGFUSE_CLICKHOUSE_PASSWORD"),
+                "clickhouse-password": env.get("LANGFUSE_CLICKHOUSE_PASSWORD"),
                 "redis-password": redis_password,
                 "default": redis_password,
                 "s3-user": "langfuse",
                 "s3-password": s3_password,
                 "seaweedfs_s3_config": json.dumps(seaweedfs_identities),
-                "init-public-key": env("LANGFUSE_PUBLIC_KEY"),
-                "init-secret-key": env("LANGFUSE_SECRET_KEY"),
-                "init-user-email": env("LANGFUSE_INIT_USER_EMAIL"),
-                "init-user-password": env("LANGFUSE_INIT_USER_PASSWORD"),
+                "init-public-key": env.get("LANGFUSE_PUBLIC_KEY"),
+                "init-secret-key": env.get("LANGFUSE_SECRET_KEY"),
+                "init-user-email": env.get("LANGFUSE_INIT_USER_EMAIL"),
+                "init-user-password": env.get("LANGFUSE_INIT_USER_PASSWORD"),
             },
         ),
     ]
-
-
-def apply() -> None:
-    added = fill_env_file()
-    print(f"{ENV_FILE.name}: added {', '.join(added) if added else 'nothing (all present)'}")
-    kube.apply_objects(kubernetes_secrets())

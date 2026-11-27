@@ -1,9 +1,11 @@
 """The "What you just saw" bullets: each claim must follow from what the run measured."""
 
 from collections import Counter
+from datetime import UTC, datetime
 
+from llm_bonsai.models import Attempt, Generation
 from llm_bonsai.probe import cache, chaos, fallback, limits, load, replicas
-from llm_bonsai.probe.load import Level, Result
+from llm_bonsai.probe.load import Level
 
 
 def reply(elapsed: float, hit: bool, cost: float, answer: str = "haiku") -> cache.Reply:
@@ -27,8 +29,12 @@ def test_cache_miss_on_the_repeat_says_the_cache_is_broken() -> None:
     assert bullets == [bullets[0]] and "isn't working" in bullets[0]
 
 
-ERROR = {"level": "ERROR", "latency": 0.006, "statusMessage": "x"}
-OK = {"level": "DEFAULT", "latency": 2.4, "model": "m"}
+def generation(level: str, latency: float) -> Generation:
+    return Generation(datetime.now(UTC), level, latency, "chat-small", "", 0, 0.0, [])
+
+
+ERROR = generation("ERROR", 0.006)
+OK = generation("DEFAULT", 2.4)
 
 
 def test_fallback_without_langfuse_only_claims_the_headers() -> None:
@@ -90,7 +96,7 @@ def test_load_that_kept_scaling_is_not_called_flat() -> None:
 
 
 def test_measure_uses_wall_time_and_counts_errors() -> None:
-    results = [Result(0.0, 2.0, 0.5, None), Result(2.0, 2.0, 0.7, None), Result(4.0, 0.1, None, "HTTP 500")]
+    results = [Attempt(0.0, 2.0, 0.5, None), Attempt(2.0, 2.0, 0.7, None), Attempt(4.0, 0.1, None, "HTTP 500")]
     measured = load.measure(1, results)
     assert (measured.attempts, measured.ok) == (3, 2)
     assert abs(measured.rps - 2 / 4.1) < 1e-9
@@ -111,11 +117,11 @@ def test_replicas_say_so_when_the_effect_did_not_show() -> None:
 
 def test_chaos_assess_finds_the_outage_and_the_cut_off_requests() -> None:
     results = [
-        Result(10.0, 2.0, 0.1, None),
-        Result(14.0, 2.0, None, "RemoteProtocolError"),  # in flight when the pod died at t=15
-        Result(16.0, 0.0, None, "ConnectError"),
-        Result(30.0, 0.0, None, "ConnectError"),
-        Result(35.0, 2.0, 0.1, None),
+        Attempt(10.0, 2.0, 0.1, None),
+        Attempt(14.0, 2.0, None, "RemoteProtocolError"),  # in flight when the pod died at t=15
+        Attempt(16.0, 0.0, None, "ConnectError"),
+        Attempt(30.0, 0.0, None, "ConnectError"),
+        Attempt(35.0, 2.0, 0.1, None),
     ]
     damage = chaos.assess(results, killed_at=15.0)
     assert (damage.failed, damage.cut_off, damage.recovered_at) == (3, 1, 35.0)
@@ -123,5 +129,5 @@ def test_chaos_assess_finds_the_outage_and_the_cut_off_requests() -> None:
 
 
 def test_chaos_assess_without_recovery() -> None:
-    damage = chaos.assess([Result(16.0, 0.0, None, "ConnectError")], killed_at=15.0)
+    damage = chaos.assess([Attempt(16.0, 0.0, None, "ConnectError")], killed_at=15.0)
     assert damage.recovered_at is None
