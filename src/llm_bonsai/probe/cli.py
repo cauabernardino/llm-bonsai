@@ -2,9 +2,11 @@ from typing import Annotated
 
 import typer
 
+from llm_bonsai.assistant import Variant
 from llm_bonsai.catalog import CHAT_SMALL
 from llm_bonsai.lab import Lab
-from llm_bonsai.probe import cache, chaos, fallback, limits, load, replicas, smoke
+from llm_bonsai.probe import app as app_probe
+from llm_bonsai.probe import cache, chaos, evaluation, fallback, limits, load, replicas, smoke
 
 app = typer.Typer(
     help="Poke the running lab and explain what happened.",
@@ -77,3 +79,26 @@ def load_command(
 ) -> None:
     """Sweep concurrency levels and report latency, TTFT (time to first token) and errors, to watch requests queue."""
     load.run(Lab.of(ctx), concurrency_levels(concurrency), duration, model, max_tokens)
+
+
+PromptOption = Annotated[Variant, typer.Option("--prompt", help="Which version of the support-answer prompt to use.")]
+
+
+@app.command("app")
+def app_command(
+    ctx: typer.Context,
+    prompt: PromptOption = Variant.baseline,
+    question: Annotated[str, typer.Option(help="What the customer asks.")] = "How long does a refund take?",
+) -> None:
+    """Ask the support assistant one question and show its nested trace in Langfuse."""
+    app_probe.run(Lab.of(ctx), prompt, question)
+
+
+@app.command("eval")
+def eval_command(
+    ctx: typer.Context,
+    prompt: PromptOption = Variant.baseline,
+    judge: Annotated[bool, typer.Option(help="Also score answers with chat-small as an LLM judge.")] = True,
+) -> None:
+    """Score the support assistant over a Langfuse dataset, as one experiment run (~1 min)."""
+    evaluation.run(Lab.of(ctx), prompt, judge)

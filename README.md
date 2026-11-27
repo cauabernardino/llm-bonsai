@@ -46,7 +46,7 @@ Two namespaces: `llm` (Ollama, LiteLLM, Postgres, Valkey) and `observability` (L
 | 3 | Langfuse: tracing the gateway | ✅ |
 | 4 | Gateway probes: fallback, limits, cache, replicas, chaos, load test | ✅ |
 | 4b | Tooling packaged as the `llm-bonsai` CLI | ✅ |
-| 5 | App tracing with nested spans, prompt versions, a mini eval | planned |
+| 5 | App tracing with nested spans, prompt versions, a mini eval | ✅ |
 | 6 | Prometheus metrics (optional) | planned |
 | 7 | vLLM on CPU (optional) | planned |
 | 8 | Argo CD (optional) | planned |
@@ -102,7 +102,7 @@ uv run llm-bonsai --help                 # setup / probe / ui / teardown
 uv run llm-bonsai setup --help           # preflight, cluster, namespaces, secrets, ollama, postgres, valkey,
                                          # cert-manager, clickhouse-operator, langfuse, litellm, all, teams
 uv run llm-bonsai setup langfuse         # e.g. re-apply only Langfuse after editing its values
-uv run llm-bonsai probe --help           # smoke, fallback, limits, cache, replicas, chaos, load
+uv run llm-bonsai probe --help           # smoke, fallback, limits, cache, replicas, chaos, load, app, eval
 ```
 
 Tip: `source .venv/bin/activate` once per shell and drop the `uv run` prefix.
@@ -136,14 +136,15 @@ src/llm_bonsai/           the Python package behind the `llm-bonsai` command
   lab.py                  Lab: the clients one command uses, closed (with its port-forwards) when it ends
   config.py               LabConfig (repo root, kube context) and EnvFile (.env, the only source of credentials)
   catalog.py              what the lab consists of: namespaces, Services, model groups, teams
-  models.py               shared records: Chart, Service, Team, GatewayPod, Generation, Attempt
+  models.py               shared records: Chart, Service, Team, GatewayPod, Observation, Attempt
+  assistant.py            the demo support assistant: FAQ retrieval, Langfuse-managed prompt, traced answer
   report.py               the output conventions every probe follows
   clients/                how the package reaches the lab
     shell.py              subprocesses, with failures as LabErrors
     kube.py               Kube: kubectl/helm pinned to the lab's context
     tunnels.py            port-forwards that live as long as the command that needs them
     gateway.py            Gateway (traffic, health, throwaway keys) and GatewayAdmin (teams, keys)
-    langfuse.py           Langfuse: reading a run's generations back
+    langfuse.py           Langfuse: the Python SDK (traces, prompts, datasets) and reading observations back
   setup/                  `llm-bonsai setup …`
     preflight.py          machine checks and cluster recommendation
     credentials.py        random dev secrets into .env, then into Kubernetes Secrets
@@ -153,6 +154,7 @@ src/llm_bonsai/           the Python package behind the `llm-bonsai` command
     smoke.py              end-to-end gateway check, including traces in Langfuse
     fallback.py limits.py cache.py replicas.py chaos.py
     load.py               asyncio load generator: latency, TTFT, error rate per concurrency
+    app.py evaluation.py  the support assistant's nested trace; its eval over a Langfuse dataset
 tests/                    unit tests for the pure logic (`make check`, no cluster needed)
 ```
 
@@ -564,6 +566,84 @@ Options: `uv run llm-bonsai probe load --concurrency 1,2,4 --duration 30 --max-t
 
 ---
 
+## Phase 5: App tracing and a mini eval
+
+**What it does.** Adds a tiny "support assistant" (`src/llm_bonsai/assistant.py`), instrumented with the Langfuse Python SDK, and evaluates it over a dataset. It answers in two steps:
+
+1. **retrieval:** keyword overlap over 8 hard-coded FAQ snippets (no embeddings);
+2. **answer:** one call through the gateway with the support-bot key, using a prompt stored in **Langfuse prompt management**. The prompt `support-answer` has two versions, labelled `baseline` (also `production`) and `strict` ("one sentence, only from the context, quote exact numbers"). The probes create them, or a new version when the text in the code changed.
+
+| Command | Shows | Takes |
+|---|---|---|
+| `uv run llm-bonsai probe app [--prompt strict] [--question "…"]` | One answer and its nested trace, read back from Langfuse | seconds |
+| `uv run llm-bonsai probe eval [--prompt strict] [--no-judge]` | The assistant scored over an 8-item dataset, as one experiment run | ~40 s |
+
+### App: one trace from the app down to the model
+
+```
+Retrieved: refund-window, refund-time
+Prompt:    support-answer v1 (label baseline)
+Answer:    A refund takes 5 to 10 business days to process.
+
+Langfuse trace 7bd64953a2105d9930c1cd5511c1771a (waiting for the gateway's part to arrive):
+  support-assistant (span) 1116 ms
+     retrieval (retriever) 0 ms
+     answer (generation; prompt support-answer v1) 1116 ms
+        litellm_request (generation; chat-small, 84 tokens, $0.0099) 1035 ms
+           raw_gen_ai_request (span) 1035 ms
+```
+
+How to read it:
+
+- The app creates `support-assistant`, `retrieval` and `answer` with the SDK. The two levels below come from **the gateway**: the app sends the `answer` span's W3C `traceparent` header with the request, and LiteLLM's OpenTelemetry callback joins that trace instead of starting its own. One header is all it takes for app and gateway telemetry to line up.
+- Tokens and cost sit on the gateway's generation only. The app's `answer` generation carries the prompt link and the input/output but no usage, so the trace's cost isn't counted twice.
+- `answer` is **linked to the prompt version**, so Langfuse can break latency, cost and scores down by version (Prompts → support-answer).
+
+### Eval: two prompt versions, scored
+
+```
+Experiment run 'strict v2 (11-28 00:56:20)': one item at a time (~5 s each with the judge)
+ #  keyword  judge  question → answer
+ 1  pass     5      How long do I have to ask for a refund? → Customers can request a full refund within 30 days of purchase.
+ 2  miss     ?      When will my refund arrive? → Customers can request a full refund within 30 days of purchase.
+ 3  pass     5      How fast is express delivery? → Express delivery takes 1 day.
+ 4  pass     ?      Can I pay with PayPal? → Yes, you can pay with PayPal.
+ 5  miss     ?      How soon do you answer a chargeback? → I don't know.
+ 6  pass     5      Which currencies can my card be charged… → Your card can be charged in EUR, USD, or GBP.
+ 7  miss     ?      Can I cancel my order? → Yes, you can cancel your order.
+ 8  pass     5      When is support available? → The support team is available from 9:00 to 17:00 CET, Monday to Frida…
+Judge replies that didn't parse (shown as ?): '5 = same facts, 3 = partly' ×2, '5 = same facts, 3 = partly,' ×2
+
+UI (`llm-bonsai ui` first): http://localhost:3000/project/llm-bonsai/experiments/results?baseline=…
+Side by side with the latest baseline run: http://localhost:3000/project/llm-bonsai/experiments/results?baseline=…&c=…
+```
+
+How to read it:
+
+- **The dataset** (`support-faq`: 8 questions, each with a reference answer and the fact it must mention) is upserted with fixed item ids, and only when an item changed, so both prompt versions run against the same dataset version.
+- **Each run is an experiment** (`dataset.run_experiment` in SDK v5, recorded through OpenTelemetry; Langfuse v4 has dropped the old dataset-run-items API). Run names carry a timestamp, because two runs with the same name would merge into one experiment.
+- **Keyword check:** deterministic, so the same answer always gets the same score. It ignores case and matches whole words only ("30 days" doesn't match "130 days"), but it only knows the words it was given.
+- **LLM judge:** `chat-small` rates each answer against the reference and must reply with a single number from 1 to 5. Anything else is a **parse failure**, recorded as a `judge-parsed = 0` score with the raw reply, not as a rating.
+- **What the judge shows:** a 0.5B judge doesn't judge. With "1 (wrong) to 5" first in its prompt it replied `1` to every answer; with the rubric used now it replies `5`, or echoes the rubric back. The score follows the prompt's wording, not the answer, which is why a real judge gets **calibrated against human labels** before anyone trusts its numbers.
+- `strict` answers are shorter and quote the context, and they show the model's limits too: #2 uses the wrong snippet, and #5 says "I don't know" although the chargeback snippet was retrieved.
+
+Run the other version (`--prompt baseline` / `--prompt strict`) and the eval prints a link that opens both runs side by side.
+
+---
+
+## What to look at
+
+With `make ui` running (log in to Langfuse with `LANGFUSE_INIT_USER_EMAIL` / `_PASSWORD` from `.env`, and to the LiteLLM UI as `admin` with `LITELLM_MASTER_KEY`):
+
+- **Per-team spend:** LiteLLM UI → Teams, or `curl localhost:4000/team/list` with the master key. `payments-ai` and `support-bot` each have their own budget and spend.
+- **A fallback trace:** run `llm-bonsai probe fallback`, then Langfuse → Tracing, filtered by the user id it prints: an ERROR generation for the dead backend, then the successful one.
+- **A trace across app and gateway:** `llm-bonsai probe app` prints a link to its trace: the app's spans, the prompt version, and the gateway's generation underneath.
+- **Prompt versions:** Langfuse → Prompts → `support-answer`: v1 `baseline`/`production`, v2 `strict`, and the generations that used each.
+- **The dataset run comparison:** run `llm-bonsai probe eval` and `llm-bonsai probe eval --prompt strict`; the second prints a side-by-side link. Or Langfuse → Datasets → `support-faq`.
+- **Replicas with and without Valkey:** `llm-bonsai probe replicas`. Without Valkey, 6 requests got through a 3/minute limit (each pod counted to 3); with Valkey, 3 did.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
@@ -583,6 +663,7 @@ Options: `uv run llm-bonsai probe load --concurrency 1,2,4 --duration 30 --max-t
 | `probe replicas` was killed (Ctrl-C twice, closed terminal) and 2 replicas are left running | The probe restores the gateway on errors and a single Ctrl-C, but not if it's killed outright. | `uv run llm-bonsai setup litellm` restores the normal single-replica config. |
 | `connection refused` on `localhost:4000` or `:3000` | Nothing forwards those ports unless `make ui` is running. | Run `make ui` (it reconnects by itself after a pod restart). |
 | `make ui`: `port 3000 ... already in use` | Something else holds the port, often a leftover `kubectl port-forward`. | `pkill -f 'port-forward svc/'`, then `make ui` again. |
+| `probe app` / `probe eval`: `NotFoundError` from Langfuse | Langfuse was reset (e.g. by `make down`) while a run was starting. | Re-run: the probes create the prompt and dataset when they're missing. |
 | `kubectl top` shows tiny or old numbers | metrics-server samples lag by up to a minute. | Wait a minute and check again. |
 | Odd `kubectl` errors or warnings | The `kubectl` client is more than one minor version away from the cluster. | `brew install kubernetes-cli` and check that `which kubectl` points to Homebrew. |
 
@@ -603,3 +684,4 @@ This is a local lab. All credentials are random, dev-only values in a gitignored
 | ClickHouse operator chart | 0.0.8 |
 | Langfuse chart / app | 2.3.0 / 4.83.0 |
 | ClickHouse / Keeper | 26.8.36.3 |
+| Langfuse Python SDK | 5.2.0 |

@@ -61,9 +61,14 @@ class GatewayPod:
 
 
 @dataclass(frozen=True)
-class Generation:
-    """One model call as Langfuse recorded it."""
+class Observation:
+    """One span or generation as Langfuse recorded it."""
 
+    id: str
+    trace_id: str
+    parent_id: str | None
+    type: str  # "SPAN", "GENERATION", "RETRIEVER", ...
+    name: str
     start_time: datetime
     level: str  # "DEFAULT", or "ERROR" for a failed call
     latency: float  # seconds
@@ -71,20 +76,33 @@ class Generation:
     status_message: str
     total_tokens: int
     total_cost: float
-    tags: list[str]
+    prompt_name: str | None
+    prompt_version: int | None
+    metadata: dict[str, Any]
+
+    @property
+    def tags(self) -> list[str]:
+        return list(self.metadata.get("attributes.langfuse.trace.tags", []))
 
     @classmethod
-    def from_api(cls, data: dict[str, Any]) -> "Generation":
-        metadata = data.get("metadata") or {}
+    def from_api(cls, data: dict[str, Any]) -> "Observation":
+        metadata: dict[str, Any] = data.get("metadata") or {}
         return cls(
+            id=data["id"],
+            trace_id=data["traceId"],
+            parent_id=data.get("parentObservationId") or None,
+            type=data["type"],
+            name=data.get("name") or "",
             start_time=datetime.fromisoformat(data["startTime"]),
             level=data["level"],
             latency=float(data.get("latency") or 0),
-            model=data.get("model"),
+            model=data.get("model") or None,
             status_message=data.get("statusMessage") or "",
             total_tokens=int(data.get("totalUsage") or 0),
             total_cost=float(data.get("totalCost") or 0),
-            tags=list(metadata.get("attributes.langfuse.trace.tags", [])),
+            prompt_name=data.get("promptName") or None,
+            prompt_version=data.get("promptVersion"),
+            metadata=metadata,
         )
 
 

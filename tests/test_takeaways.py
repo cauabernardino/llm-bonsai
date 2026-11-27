@@ -2,9 +2,10 @@
 
 from collections import Counter
 from datetime import UTC, datetime
+from typing import Any
 
-from llm_bonsai.models import Attempt, Generation
-from llm_bonsai.probe import cache, chaos, fallback, limits, load, replicas
+from llm_bonsai.models import Attempt, Observation
+from llm_bonsai.probe import app, cache, chaos, evaluation, fallback, limits, load, replicas
 from llm_bonsai.probe.load import Level
 
 
@@ -29,8 +30,29 @@ def test_cache_miss_on_the_repeat_says_the_cache_is_broken() -> None:
     assert bullets == [bullets[0]] and "isn't working" in bullets[0]
 
 
-def generation(level: str, latency: float) -> Generation:
-    return Generation(datetime.now(UTC), level, latency, "chat-small", "", 0, 0.0, [])
+def observation(name: str, type: str = "SPAN", parent: str | None = None, **fields: Any) -> Observation:
+    defaults: dict[str, Any] = {
+        "id": name,
+        "trace_id": "t",
+        "parent_id": parent,
+        "type": type,
+        "name": name,
+        "start_time": datetime.now(UTC),
+        "level": "DEFAULT",
+        "latency": 0.0,
+        "model": None,
+        "status_message": "",
+        "total_tokens": 0,
+        "total_cost": 0.0,
+        "prompt_name": None,
+        "prompt_version": None,
+        "metadata": {},
+    }
+    return Observation(**(defaults | fields))
+
+
+def generation(level: str, latency: float) -> Observation:
+    return observation("litellm_request", "GENERATION", level=level, latency=latency, model="chat-small")
 
 
 ERROR = generation("ERROR", 0.006)
@@ -131,3 +153,76 @@ def test_chaos_assess_finds_the_outage_and_the_cut_off_requests() -> None:
 def test_chaos_assess_without_recovery() -> None:
     damage = chaos.assess([Attempt(16.0, 0.0, None, "ConnectError")], killed_at=15.0)
     assert damage.recovered_at is None
+
+
+def app_trace(*, gateway_parent: str | None = "answer", prompt: bool = True) -> list[Observation]:
+    trace = [
+        observation("support-assistant"),
+        observation("retrieval", "RETRIEVER", parent="support-assistant"),
+        observation(
+            "answer",
+            "GENERATION",
+            parent="support-assistant",
+            prompt_name="support-answer" if prompt else None,
+            prompt_version=2 if prompt else None,
+        ),
+    ]
+    if gateway_parent:
+        trace.append(
+            observation("litellm_request", "GENERATION", parent=gateway_parent, total_tokens=84, total_cost=0.0099)
+        )
+    return trace
+
+
+def test_app_trace_with_everything_nested() -> None:
+    shape = app.shape(app_trace())
+    assert shape.nested and shape.gateway is not None and shape.prompt == "support-answer v2"
+    bullets = app.takeaways(shape)
+    assert "84 tokens" in bullets[1] and "traceparent" in bullets[1]
+    assert "support-answer v2" in bullets[2]
+
+
+def test_app_trace_without_the_gateway_part() -> None:
+    shape = app.shape(app_trace(gateway_parent=None, prompt=False))
+    assert shape.gateway is None and shape.prompt is None
+    bullets = app.takeaways(shape)
+    assert "didn't show up" in bullets[1] and len(bullets) == 2
+
+
+def test_app_tree_indents_children_under_their_parent() -> None:
+    lines = app.tree(app_trace())
+    assert [line.split(" (")[0] for line in lines] == [
+        "  support-assistant",
+        "     retrieval",
+        "     answer",
+        "        litellm_request",
+    ]
+
+
+def eval_row(keyword: bool, rating: int | None) -> evaluation.Row:
+    return evaluation.Row("support-faq-01", "q", "a", keyword, rating, None if rating is None else str(rating))
+
+
+def test_eval_with_a_constant_judge_that_contradicts_the_keyword_check() -> None:
+    rows = [eval_row(True, 5), eval_row(False, 5), eval_row(False, None)]
+    bullets = evaluation.takeaways(rows, total=4, judge=True)
+    assert "1 of 4 items failed" in bullets[0]
+    assert "1 of 3 answers" in bullets[1]
+    assert "mean 5.0 over 2 answers, and 1 parse failure (replies" in bullets[2]
+    assert "isn't judging" in bullets[3] and "calibration" in bullets[3]
+
+
+def test_eval_with_a_constant_judge_the_keyword_check_agrees_with() -> None:
+    bullets = evaluation.takeaways([eval_row(True, 5), eval_row(True, 5)], total=2, judge=True)
+    assert "can't tell a correct judge" in bullets[2]
+
+
+def test_eval_judge_that_varies_and_disagrees() -> None:
+    bullets = evaluation.takeaways([eval_row(True, 1), eval_row(True, 4)], total=2, judge=True)
+    assert "contradicted the keyword check on 1 answer " in bullets[2]
+
+
+def test_eval_without_the_judge_or_any_parsed_rating() -> None:
+    assert len(evaluation.takeaways([eval_row(True, None)], total=1, judge=False)) == 1
+    bullets = evaluation.takeaways([eval_row(True, None)], total=1, judge=True)
+    assert "no judge score" in bullets[1] and len(bullets) == 2

@@ -11,7 +11,7 @@ from llm_bonsai.catalog import TEAMS
 from llm_bonsai.clients.gateway import GatewayAdmin
 from llm_bonsai.config import EnvFile
 from llm_bonsai.errors import LabError
-from llm_bonsai.models import GatewayPod, Generation
+from llm_bonsai.models import GatewayPod, Observation
 from llm_bonsai.setup.teams import ensure_teams
 
 
@@ -91,9 +91,16 @@ def test_gateway_pod_from_the_kubernetes_api() -> None:
     assert GatewayPod.from_api({"metadata": {"name": "new"}}) == GatewayPod("new", ready=False, terminating=False)
 
 
-def test_generation_from_the_langfuse_api() -> None:
-    generation = Generation.from_api(
+def test_observation_from_the_langfuse_api() -> None:
+    generation = Observation.from_api(
         {
+            "id": "2b9c19f7ea8ae5d0",
+            "traceId": "7f77cd706fc8037ddc7022d3575c95da",
+            "parentObservationId": None,
+            "type": "GENERATION",
+            "name": "litellm_request",
+            "promptName": "",
+            "promptVersion": None,
             "startTime": "2026-11-27T23:04:01.062Z",
             "level": "DEFAULT",
             "latency": 0.825,
@@ -107,3 +114,4 @@ def test_generation_from_the_langfuse_api() -> None:
     assert (generation.total_tokens, generation.total_cost, generation.latency) == (413, 0.0426, 0.825)
     assert generation.tags == ["user_api_key_team_alias:payments-ai"]
     assert generation.start_time.tzinfo is not None
+    assert generation.parent_id is None and generation.prompt_name is None

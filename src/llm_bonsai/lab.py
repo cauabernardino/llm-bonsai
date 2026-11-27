@@ -33,6 +33,7 @@ class Lab:
         return lab
 
     def close(self) -> None:
+        self.langfuse.close()  # flushes the SDK, so it must go before the port-forward it sends through
         self.tunnels.close()
 
     def __enter__(self) -> "Lab":

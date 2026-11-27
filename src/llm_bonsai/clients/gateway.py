@@ -113,9 +113,11 @@ class Gateway:
         """Move the port-forward to a live pod, e.g. after a redeploy replaced the one it was pinned to."""
         self._tunnels.forward(GATEWAY).restart()
 
-    def client(self, key: str) -> openai.OpenAI:
+    def client(self, key: str, timeout_s: float | None = None) -> openai.OpenAI:
         """OpenAI SDK pointed at the gateway. No SDK retries: the probes show raw behaviour."""
-        return openai.OpenAI(base_url=f"{self.base_url}/v1", api_key=key, max_retries=0)
+        return openai.OpenAI(
+            base_url=f"{self.base_url}/v1", api_key=key, max_retries=0, timeout=timeout_s or openai.DEFAULT_TIMEOUT
+        )
 
     @contextmanager
     def admin(self) -> Generator[GatewayAdmin, None, None]:

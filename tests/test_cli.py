@@ -22,7 +22,7 @@ def test_command_tree() -> None:
         "preflight", "cluster", "namespaces", "secrets", "ollama", "postgres", "valkey",
         "cert-manager", "clickhouse-operator", "langfuse", "litellm", "all", "teams",
     }  # fmt: skip
-    assert subcommands("probe") == {"smoke", "fallback", "limits", "cache", "replicas", "chaos", "load"}
+    assert subcommands("probe") == {"smoke", "fallback", "limits", "cache", "replicas", "chaos", "load", "app", "eval"}
 
 
 def test_teardown_asks_before_deleting() -> None:

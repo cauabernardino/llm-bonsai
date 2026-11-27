@@ -15,7 +15,7 @@ from llm_bonsai import report
 from llm_bonsai.catalog import CHAT_BROKEN, CHAT_SMALL, PAYMENTS_AI
 from llm_bonsai.clients.langfuse import Langfuse, run_id
 from llm_bonsai.lab import Lab
-from llm_bonsai.models import Generation
+from llm_bonsai.models import Observation
 
 PROMPT = "In one sentence: what is a payment refund?"
 FALLBACK_HEADERS = ["x-litellm-model-group", "x-litellm-attempted-fallbacks", "x-litellm-model-api-base"]
@@ -31,7 +31,7 @@ def describe_failure(status_message: str) -> str:
     return f"{host.group(1)} [{reason.group(1)}]" if reason else host.group(1)
 
 
-def show_langfuse(langfuse: Langfuse, user_id: str) -> list[Generation]:
+def show_langfuse(langfuse: Langfuse, user_id: str) -> list[Observation]:
     """Print the run's attempts as Langfuse recorded them; returns them (empty if Langfuse had none)."""
     print(f"\nLangfuse, user {user_id}:")
     try:
@@ -52,7 +52,7 @@ def show_langfuse(langfuse: Langfuse, user_id: str) -> list[Generation]:
     return generations
 
 
-def takeaways(headers: Mapping[str, str], generations: list[Generation]) -> list[str]:
+def takeaways(headers: Mapping[str, str], generations: list[Observation]) -> list[str]:
     attempted = headers.get("x-litellm-attempted-fallbacks")
     if not attempted or attempted == "0":
         return [
