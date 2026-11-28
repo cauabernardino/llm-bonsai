@@ -29,6 +29,12 @@ dependencies = [
     "typer>=0.29.3",
 ]
 
+[project.urls]
+Homepage = "https://github.com/cauabernardino/llm-bonsai"
+Documentation = "https://github.com/cauabernardino/llm-bonsai#readme"
+Repository = "https://github.com/cauabernardino/llm-bonsai"
+Issues = "https://github.com/cauabernardino/llm-bonsai/issues"
+
 [project.scripts]
 llm-bonsai = "llm_bonsai.cli:main"
 
