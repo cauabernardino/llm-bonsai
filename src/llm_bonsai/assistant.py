@@ -77,8 +77,16 @@ STOPWORDS = frozenset(
 )
 
 
+def stem(word: str) -> str:
+    """Crude suffix stripping, so "chargebacks" and "answered" match "chargeback" and "answer"."""
+    for suffix in ("ing", "ed", "s"):
+        if word.endswith(suffix) and len(word) - len(suffix) >= 3 and not word.endswith("ss"):
+            return word[: -len(suffix)]
+    return word
+
+
 def tokens(text: str) -> set[str]:
-    return {word for word in re.findall(r"[a-z0-9]+", text.lower()) if word not in STOPWORDS}
+    return {stem(word) for word in re.findall(r"[a-z0-9]+", text.lower()) if word not in STOPWORDS}
 
 
 def retrieve(question: str, k: int = 2) -> list[Snippet]:

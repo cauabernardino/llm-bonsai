@@ -39,7 +39,7 @@ def secrets(ctx: typer.Context) -> None:
 
 @app.command("ollama")
 def ollama(ctx: typer.Context) -> None:
-    """Install Ollama and pull qwen2.5:0.5b and nomic-embed-text (first run: a few minutes)."""
+    """Install Ollama and pull qwen2.5:1.5b and nomic-embed-text (first run: a few minutes)."""
     Lab.of(ctx).installer.install_ollama()
 
 

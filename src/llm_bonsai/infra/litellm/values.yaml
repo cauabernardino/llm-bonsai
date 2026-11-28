@@ -70,7 +70,7 @@ gateway:
       model_list:
         - model_name: chat-small
           litellm_params:
-            model: ollama_chat/qwen2.5:0.5b
+            model: ollama_chat/qwen2.5:1.5b
             api_base: http://ollama.llm.svc.cluster.local:11434
           # Fake prices: local models cost $0, so budgets could never be hit otherwise.
           model_info:
@@ -80,7 +80,7 @@ gateway:
         # Points at nothing on purpose, to demonstrate fallbacks. Fail fast, no retries.
         - model_name: chat-broken
           litellm_params:
-            model: ollama_chat/qwen2.5:0.5b
+            model: ollama_chat/qwen2.5:1.5b
             api_base: http://does-not-exist.llm.svc.cluster.local:1234
             timeout: 5
             num_retries: 0
@@ -99,7 +99,7 @@ gateway:
       router_settings:
         fallbacks:
           - chat-broken: [chat-small]
-        # Upper bound per LLM call. A 0.5B model on CPU answers well within this,
+        # Upper bound per LLM call. A 1.5B model on CPU answers well within this,
         # but queued requests under load can take a while.
         timeout: 120
 

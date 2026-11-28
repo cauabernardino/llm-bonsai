@@ -5,7 +5,7 @@
 llm-bonsai runs the core of a GenAI platform in a local Kubernetes cluster, with **no paid API keys**:
 
 - an **LLM gateway** ([LiteLLM](https://docs.litellm.ai/)): one OpenAI-compatible endpoint with per-team keys, budgets, rate limits, fallbacks and caching;
-- a **self-hosted model** ([Ollama](https://ollama.com/) serving `qwen2.5:0.5b` on CPU), standing in for a GPU serving stack;
+- a **self-hosted model** ([Ollama](https://ollama.com/) serving `qwen2.5:1.5b` on CPU), standing in for a GPU serving stack;
 - **observability and evals** ([Langfuse](https://langfuse.com/)): traces, prompt versions, datasets and scored experiment runs;
 - **metrics** (optional [Prometheus](https://prometheus.io/)): the gateway's requests, spend and latency over time;
 - the **state** a gateway needs to scale out: Postgres for keys, teams and spend, and Valkey (an open-source Redis fork) for shared rate limits and the cache.
@@ -15,7 +15,7 @@ Each piece is the real thing (official images and charts, real config), shrunk t
 ```mermaid
 flowchart LR
   PY["llm-bonsai CLI / demo app"] --> LL["LiteLLM proxy (gateway)"]
-  LL --> OL["Ollama: qwen2.5:0.5b (CPU)"]
+  LL --> OL["Ollama: qwen2.5:1.5b (CPU)"]
   LL --> PG[("Postgres: keys, teams, spend")]
   LL --> VK[("Valkey: cache + shared limits")]
   LL -- "OpenTelemetry callback" --> LF["Langfuse"]
@@ -27,7 +27,7 @@ flowchart LR
 | Component | Plays the role of | Namespace |
 |---|---|---|
 | LiteLLM proxy | The LLM gateway: single endpoint, per-team keys, budgets and limits, fallbacks, caching | `llm` |
-| Ollama + a 0.5B model | Self-hosted model serving (vLLM/TGI on GPUs in production) | `llm` |
+| Ollama + a 1.5B model | Self-hosted model serving (vLLM/TGI on GPUs in production) | `llm` |
 | Postgres, Valkey | The gateway's system of record, and its shared counters and cache | `llm` |
 | Langfuse | Tracing, prompt management, datasets and evals | `observability` |
 | Prometheus | Metrics scraping and queries | `observability` |
@@ -188,14 +188,14 @@ The sections below explain what each phase installs, show results from real runs
 
 ### Phase 1: Local model with Ollama
 
-The [otwld/ollama](https://github.com/otwld/ollama-helm) chart in `llm` pulls `qwen2.5:0.5b` (chat) and `nomic-embed-text` (embeddings) onto a 5 Gi volume, capped at 3 CPUs / 2 GiB. The models are pulled in a `postStart` hook, and readiness probes wait for it, so Ready means the models are on disk.
+The [otwld/ollama](https://github.com/otwld/ollama-helm) chart in `llm` pulls `qwen2.5:1.5b` (chat) and `nomic-embed-text` (embeddings) onto a 5 Gi volume, capped at 3 CPUs / 2.5 GiB. The models are pulled in a `postStart` hook, and readiness probes wait for it, so Ready means the models are on disk.
 
-Clients normally go through the gateway. To reach Ollama directly, run `kubectl -n llm port-forward svc/ollama 11434:11434`, then `curl localhost:11434/api/tags`. Or skip the port-forward: `kubectl -n llm exec -it deploy/ollama -- ollama run qwen2.5:0.5b`.
+Clients normally go through the gateway. To reach Ollama directly, run `kubectl -n llm port-forward svc/ollama 11434:11434`, then `curl localhost:11434/api/tags`. Or skip the port-forward: `kubectl -n llm exec -it deploy/ollama -- ollama run qwen2.5:1.5b`.
 
 - **CPU only.** The model runs inside the Linux VM, where Apple's Metal GPU isn't visible (`inference compute id=cpu`). Ollama sizes itself against the container's memory limit, not the node's.
 - **`OLLAMA_NUM_PARALLEL=2`**, set explicitly. Two requests per model run at once; the rest queue. That's what `probe load` exposes.
 - **`OLLAMA_KEEP_ALIVE=24h`** keeps the model loaded, so cold loads don't distort latency.
-- **The context window defaults to 4096 tokens on CPU.** The KV cache grows with context × parallel requests, ~690 MiB here.
+- **The context window defaults to 4096 tokens on CPU.** The KV cache grows with context × parallel requests: the model takes ~1.3 GiB loaded, and Ollama peaks at ~1.9 GiB serving two requests at once.
 
 ### Phase 2: LiteLLM gateway
 
@@ -203,7 +203,7 @@ Postgres (`postgres:16-alpine`) and Valkey come from plain manifests. LiteLLM us
 
 | Model name | Backed by | Purpose |
 |---|---|---|
-| `chat-small` | `qwen2.5:0.5b` | the working chat model, with **fake prices** so budgets can run out |
+| `chat-small` | `qwen2.5:1.5b` | the working chat model, with **fake prices** so budgets can run out |
 | `chat-broken` | a host that doesn't exist (5 s timeout, no retries) | falls back to `chat-small` |
 | `embed` | `nomic-embed-text` | embeddings |
 
@@ -248,18 +248,17 @@ This phase points LiteLLM's `redis.host` at Valkey, so rate limits and spend cou
 #### Fallback
 
 ```
-Requested model chat-broken → HTTP 200 in 1.00s
-Response headers:
-  x-litellm-model-group: chat-small
-  x-litellm-attempted-fallbacks: 1
-Langfuse, user fallback-75f784a6:
-    start     took  outcome
-  +   0ms      5ms  ERROR  does-not-exist.llm.svc.cluster.local:1234 [Name or service not known]
-  +  18ms    922ms  ok     ollama_chat/qwen2.5:0.5b
+Requested model chat-broken → HTTP 200 in 5.95s
+ x-litellm-model-group           chat-small
+ x-litellm-attempted-fallbacks   1
+Langfuse, user fallback-b617c376
+  start      took   outcome   backend
+  +0 ms     10 ms   ERROR     does-not-exist.llm.svc.cluster.local:1234 [Name or service not known]
+ +30 ms   5835 ms   ok        ollama_chat/qwen2.5:1.5b
 ```
 
 - The client sees a normal 200. Langfuse records the backend, not the alias, so the dead host is how you spot the failed deployment.
-- This backend failed in 5 ms on DNS. A backend that *hangs* costs up to `timeout × (1 + num_retries)` before the fallback starts, hence `timeout: 5` and `num_retries: 0`.
+- This backend failed in 10 ms on DNS. A backend that *hangs* costs up to `timeout × (1 + num_retries)` before the fallback starts, hence `timeout: 5` and `num_retries: 0`.
 - `mock_testing_fallbacks` is off in v1.111 unless an admin sets `general_settings.dangerously_allow_mock_testing_request_params: true`, so callers can't force failovers.
 
 #### Limits and budgets
@@ -282,11 +281,11 @@ Spend in Postgres (/key/info) right now: $0.0096
 #### Cache
 
 ```
- #  request                         took  cache  cost
- 1  opt in                       1199 ms  miss   $0.0097
- 2  opt in, same as #1             20 ms  HIT    $0.0000
- 3  opt in, temperature=0.1       487 ms  miss   $0.0085
- 4  no opt-in                    1194 ms  off    $0.0099
+ #   request                      took   cache      cost
+ 1   opt in                    1654 ms   miss    $0.0091
+ 2   opt in, same as #1          19 ms   HIT     $0.0000
+ 3   opt in, temperature=0.1   1416 ms   miss    $0.0085
+ 4   no opt-in                 1495 ms   off     $0.0081
 ```
 
 The cache key covers the model, the messages *and* the parameters, so this is exact-match caching. #4 didn't opt in, so the model ran again and wrote a different answer.
@@ -315,14 +314,14 @@ With one replica, a deleted pod means a full outage. In-flight streams may finis
 #### Load: requests queue
 
 ```
-conc  reqs  req/s  p50 lat  p95 lat p50 ttft p95 ttft  errors
-   1     7   0.33    3.00s    3.74s    0.10s    0.12s  0
-   2    10   0.47    4.31s    4.65s    0.20s    0.25s  0
-   4    12   0.47    7.49s    9.67s    4.25s    5.22s  0
-   8    16   0.38   17.48s   24.29s   12.95s   17.93s  0
+ conc   reqs   req/s   p50 lat   p95 lat   p50 ttft   p95 ttft   errors
+    1      5    0.24     4.20s     5.22s      0.11s      0.22s   0
+    2      6    0.28     7.05s     7.97s      0.30s      0.40s   0
+    4     10    0.31    12.18s    13.21s      5.98s      7.75s   0
+    8     13    0.24    24.50s    36.07s     16.85s     23.74s   0
 ```
 
-- **1 → 2:** time to first token stays low (two slots in Ollama), but the two requests share the CPU, so throughput rises only ~40%.
+- **1 → 2:** time to first token stays low (two slots in Ollama), but the two requests share the CPU, so throughput rises only ~17%.
 - **2 → 8:** throughput is flat while TTFT climbs. The extra requests are waiting in a queue, not computing.
 - **So model serving scales on queue depth.** A CPU autoscaler sees the same busy CPU at 2 and at 8; vLLM exposes `num_requests_waiting` for exactly this.
 
@@ -334,15 +333,16 @@ A tiny support assistant (`src/llm_bonsai/assistant.py`) answers in two steps: k
 
 ```
 $ llm-bonsai probe app
-Retrieved: refund-window, refund-time
-Prompt:    support-answer v1 (label baseline)
-Answer:    A refund takes 5 to 10 business days to process.
+Retrieved  refund-window, refund-time
+Prompt     support-answer v1 (label baseline)
+Answer     A refund can take 5 to 10 business days to reach the original payment method after it has been approved.
 
-  support-assistant (span) 1116 ms
-     retrieval (retriever) 0 ms
-     answer (generation; prompt support-answer v1) 1116 ms
-        litellm_request (generation; chat-small, 84 tokens, $0.0099) 1035 ms
-           raw_gen_ai_request (span) 1035 ms
+Langfuse trace dfcde0493699dd891ea1b58533e92156
+  support-assistant (span) 2565 ms
+     retrieval (retriever) 1 ms
+     answer (generation; prompt support-answer v1) 2564 ms
+        litellm_request (generation; chat-small, 94 tokens, $0.0119) 2517 ms
+           raw_gen_ai_request (span) 2517 ms
 ```
 
 - **The bottom two levels come from the gateway.** The app sends the `answer` span's W3C `traceparent` header, and LiteLLM's OpenTelemetry callback joins that trace instead of starting a new one.
@@ -351,18 +351,17 @@ Answer:    A refund takes 5 to 10 business days to process.
 
 ```
 $ llm-bonsai probe eval --prompt strict
- #  keyword  judge  question → answer
- 1  pass     5      How long do I have to ask for a refund? → Customers can request a full refund within 30 days of purchase.
- 2  miss     ?      When will my refund arrive? → Customers can request a full refund within 30 days of purchase.
- 5  miss     ?      How soon do you answer a chargeback? → I don't know.
- ⋮
-Judge replies that didn't parse (shown as ?): '5 = same facts, 3 = partly' ×2, …
+ #   keyword   judge   question                                answer
+ 1   pass          5   How long do I have to ask for a refund? You have 30 days to request a refund.
+ 2   pass          5   When will my refund arrive?             Your refund will reach the original payment method within 5 to 10 business days…
+ 5   pass          5   How soon do you answer a chargeback?    We answer chargebacks within 7 days.
+ ⋮   (8 of 8 pass the keyword check, all rated 5, with both prompts)
 ```
 
 - **Each run is a Langfuse experiment** over the `support-faq` dataset (SDK v5 `run_experiment`; v4 dropped the old dataset-run API). Items are upserted with fixed ids, so both prompts run against the same dataset version. Run names carry a timestamp, because same-name runs would merge.
 - **Keyword check:** deterministic, case-insensitive, whole words only. It only knows the words it was given.
-- **The 0.5B judge doesn't judge.** With one rubric it answered `1` to everything; with another, `5` to everything, or it echoed the rubric back. Unparseable replies are recorded as `judge-parsed = 0`, not as ratings. This is why a real judge is **calibrated against human labels** before anyone trusts it.
-- The misses are real retrieval failures: #2 tied two refund snippets and picked the wrong one.
+- **The judge's score is only as good as its calibration.** Here every answer is right and every rating is 5, so this run can't tell a working judge from one that always says 5; the probe says exactly that. Checked separately on known pairs, `qwen2.5:1.5b` gave the reference answer 5 and a wrong one 3 in 7 of 8 pairs: it ranks correctly, but "3 = partly" in the rubric catches answers that are plain wrong. The previous `qwen2.5:0.5b` didn't judge at all: it rated everything 5 or echoed the rubric back. Unparseable replies are recorded as `judge-parsed = 0`, not as ratings. This is why a real judge is **calibrated against human labels** before anyone trusts it.
+- **Retrieval is keyword overlap with crude suffix stripping**, so "chargeback" finds the "Chargebacks" snippet. Without it, that question retrieved nothing, and small models made up an answer. Real systems use embeddings for exactly this.
 
 ### Phase 6: Gateway metrics
 
@@ -421,7 +420,7 @@ Measured on this stack. Every container has requests and limits.
 | Piece | RAM |
 |---|---|
 | LiteLLM (one pod) | ~1.2 GiB steady, ~1.8 GiB peak at startup |
-| Ollama with `qwen2.5:0.5b` loaded | ~1 GiB |
+| Ollama with `qwen2.5:1.5b` loaded | ~1.3 GiB idle, ~1.9 GiB serving 2 requests |
 | Postgres + Valkey | ~120 MiB |
 | Langfuse stack | ~1.8 GiB idle; ClickHouse grows with data, capped at 1.5 GiB |
 | Kubernetes system pods | ~0.7 GiB |

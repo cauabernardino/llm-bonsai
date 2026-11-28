@@ -2,7 +2,7 @@
 
 import pytest
 
-from llm_bonsai.assistant import PROMPTS, Variant, messages, retrieve
+from llm_bonsai.assistant import PROMPTS, Variant, messages, retrieve, stem
 from llm_bonsai.probe.evaluation import CASES, mentions, parse_rating
 
 
@@ -45,3 +45,8 @@ def test_every_case_mentions_its_own_reference_answer() -> None:
 )
 def test_parse_rating_needs_exactly_one_number_from_1_to_5(reply: str, rating: int | None) -> None:
     assert parse_rating(reply) == rating
+
+
+def test_retrieval_matches_plurals_and_past_tense() -> None:
+    assert [s.id for s in retrieve("How soon do you answer a chargeback?", k=1)] == ["chargeback"]
+    assert stem("business") == "business" and stem("shipped") == "shipp" and stem("days") == "day"

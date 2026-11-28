@@ -65,18 +65,24 @@ def header(key: str, prompt: str) -> None:
     console.print()
 
 
-def table(*columns: str | Column, title: str | None = None, caption: str | None = None) -> Table:
+def table(*columns: str | Column, title: str | None = None, caption: str | None = None, lines: bool = False) -> Table:
+    """A table in the house style; `lines` rules off every row, for rows that wrap over several lines.
+
+    With `prose` columns it spans the terminal, and those columns share whatever width the others leave.
+    """
     return Table(
         *columns,
+        expand=any(isinstance(column, Column) and column.ratio for column in columns),
+        show_lines=lines,
         title=title,
         caption=caption,
         caption_justify="left",
         caption_style="dim",
         title_justify="left",
         title_style="bold",
-        box=box.SIMPLE_HEAD,
+        box=box.ROUNDED if lines else box.SIMPLE_HEAD,
         header_style="bold",
-        pad_edge=False,
+        pad_edge=lines,
     )
 
 
@@ -93,12 +99,19 @@ def live(renderable: RenderableType) -> Iterator[None]:
 
 
 def right(header: str) -> Column:
-    return Column(header, justify="right")
+    """A column of numbers: right-aligned, never wrapped."""
+    return Column(header, justify="right", no_wrap=True)
 
 
-def clipped(header: str) -> Column:
-    """A column for free text that would otherwise wrap every row: one line each, cut with '…'."""
-    return Column(header, no_wrap=True, overflow="ellipsis")
+def fixed(header: str) -> Column:
+    """A column of short labels (pass/miss, HIT): never wrapped, so long text columns can't squeeze it away."""
+    return Column(header, no_wrap=True)
+
+
+def prose(header: str, share: int = 1) -> Column:
+    """A column of free text, wrapped in full. Prose columns split the width the other columns
+    leave, in proportion to `share`."""
+    return Column(header, ratio=share)
 
 
 def http(status: int) -> Text:

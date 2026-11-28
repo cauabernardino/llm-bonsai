@@ -70,8 +70,8 @@ def keyword_check(*, input: Any, output: Any, expected_output: Any, metadata: An
     return Evaluation(name="keyword", value=1.0 if hit else 0.0, comment=f"looked for: {' / '.join(options)}")
 
 
-# A 0.5B judge follows the rubric's wording, not the answer: with "1 (wrong) to 5" first it scored
-# everything 1, with this rubric everything 5. The probe reports that instead of trusting the number.
+# Small judges follow the rubric's wording as much as the answer (qwen2.5:0.5b scored everything 1 or
+# everything 5 depending on which end came first), so the probe counts parse failures instead of hiding them.
 JUDGE_PROMPT = """QUESTION: {question}
 REFERENCE ANSWER: {reference}
 CANDIDATE ANSWER: {answer}
@@ -190,7 +190,7 @@ def takeaways(rows: list[Row], total: int, judge: bool) -> list[str]:
     bullets.append(f"Judge (chat-small rating 1–5): mean {mean:.1f} over {plural(len(rated), 'answer')}{failures}.")
 
     calibration = (
-        "A 0.5B judge is unreliable: before trusting any LLM judge, score a sample by hand and check the judge "
+        "A small judge is unreliable: before trusting any LLM judge, score a sample by hand and check the judge "
         "against those human labels (calibration)."
     )
     ratings = {rating for _, rating in rated}
@@ -259,7 +259,14 @@ def run(lab: Lab, variant: Variant, judge: bool) -> None:
     )
 
     rows = sorted((row(item_result) for item_result in result.item_results), key=lambda r: r.id)
-    scored = report.table(report.right("#"), "keyword", "judge", report.clipped("question"), report.clipped("answer"))
+    scored = report.table(
+        report.right("#"),
+        report.fixed("keyword"),
+        report.right("judge"),
+        report.prose("question"),
+        report.prose("answer", share=2),
+        lines=True,
+    )
     for n, r in enumerate(rows, start=1):
         rating = str(r.rating) if r.rating is not None else ("?" if judge else "–")
         keyword = Text("pass", style="green") if r.keyword else Text("miss", style="red")
