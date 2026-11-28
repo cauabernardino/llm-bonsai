@@ -8,8 +8,9 @@ import sys
 import threading
 from dataclasses import dataclass
 from types import FrameType
-from typing import Annotated
+from typing import Annotated, TypeGuard
 
+import httpx
 import typer
 from rich.text import Text
 
@@ -99,15 +100,18 @@ def chat_command(
 @app.command("teardown")
 def teardown(
     ctx: typer.Context,
-    cluster: Annotated[bool, typer.Option("--cluster", help="Delete the whole minikube cluster instead.")] = False,
+    cluster: Annotated[
+        bool, typer.Option("--cluster", help="Delete the lab's whole minikube profile instead.")
+    ] = False,
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Don't ask for confirmation.")] = False,
 ) -> None:
     """Uninstall the lab and all its data (model downloads, traces), keeping the cluster and its operators."""
+    profile = Lab.of(ctx).config.minikube_profile
     if not yes:
-        what = "the whole minikube cluster" if cluster else "the lab's releases and all their data"
+        what = f"the whole minikube profile {profile!r}" if cluster else "the lab's releases and all their data"
         typer.confirm(f"Delete {what}?", abort=True)
     if cluster:
-        infra.delete_cluster()
+        infra.delete_cluster(profile)
     else:
         Lab.of(ctx).installer.uninstall()
 
@@ -136,10 +140,34 @@ def exit_on_sigterm(signum: int, frame: FrameType | None) -> None:
     sys.exit(128 + signum)
 
 
+def is_json_object(value: object) -> TypeGuard[dict[str, object]]:
+    return isinstance(value, dict)
+
+
+def describe(error: httpx.HTTPStatusError) -> str:
+    """One line for a failed management API call. The path only: a query string could hold a key."""
+    request, response = error.request, error.response
+    try:
+        detail: object = response.json()
+    except ValueError:
+        detail = response.text
+    # LiteLLM nests its message as {"detail": {"error": …}} or {"error": {"message": …}}; Langfuse {"message": …}.
+    while is_json_object(detail):
+        field = next((f for f in ("error", "detail", "message") if f in detail), None)
+        if field is None:
+            break
+        detail = detail[field]
+    message = " ".join(str(detail).split())[:200]
+    return f"{request.method} {request.url.host}{request.url.path} answered HTTP {response.status_code}: {message}"
+
+
 def main() -> None:
     signal.signal(signal.SIGTERM, exit_on_sigterm)
     try:
         app()
     except LabError as error:
         report.error(str(error))
+        sys.exit(1)
+    except httpx.HTTPStatusError as error:
+        report.error(describe(error))
         sys.exit(1)

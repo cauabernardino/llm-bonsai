@@ -180,6 +180,6 @@ def run(lab: Lab) -> None:
 
     spend = report.table("spend, according to", report.right("$"))
     spend.add_row("x-litellm-response-cost headers, summed", f"{budget.spent:.4f}")
-    spend.add_row("Postgres (/key/info), right now", f"{recorded:.4f}")
+    spend.add_row("Postgres (/v2/key/info), right now", f"{recorded:.4f}")
     report.show(spend)
     report.summary(*takeaways(quick, budget, recorded))

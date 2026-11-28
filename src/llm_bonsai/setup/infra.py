@@ -92,17 +92,30 @@ def orphaned_volumes(volumes: Iterable[dict[str, Any]]) -> tuple[list[str], list
     return names, paths
 
 
-def create_cluster() -> None:
+PART_OF_LABEL = "app.kubernetes.io/part-of"
+PART_OF = "llm-bonsai"
+
+
+def create_cluster(profile: str) -> None:
     run(
-        "minikube", "start", "--driver=docker", f"--kubernetes-version={KUBERNETES_VERSION}", f"--cpus={CLUSTER_CPUS}",
-        f"--memory={CLUSTER_MEMORY_GIB}g", f"--disk-size={CLUSTER_DISK_GB}g",
+        "minikube", "start", "-p", profile, "--driver=docker", f"--kubernetes-version={KUBERNETES_VERSION}",
+        f"--cpus={CLUSTER_CPUS}", f"--memory={CLUSTER_MEMORY_GIB}g", f"--disk-size={CLUSTER_DISK_GB}g",
         capture=False,
     )  # fmt: skip
-    run("minikube", "addons", "enable", "metrics-server", capture=False)
+    run("minikube", "addons", "enable", "metrics-server", "-p", profile, capture=False)
 
 
-def delete_cluster() -> None:
-    run("minikube", "delete", capture=False)
+def delete_cluster(profile: str) -> None:
+    run("minikube", "delete", "-p", profile, capture=False)
+
+
+def foreign_namespaces(namespaces: Iterable[dict[str, Any]]) -> list[str]:
+    """The lab's namespaces that exist but weren't created by llm-bonsai, so teardown must not empty them."""
+    return [
+        namespace["metadata"]["name"]
+        for namespace in namespaces
+        if namespace["metadata"].get("labels", {}).get(PART_OF_LABEL) != PART_OF
+    ]
 
 
 class Installer:
@@ -113,12 +126,30 @@ class Installer:
     def install_namespaces(self) -> None:
         self._kube.apply_file("namespaces.yaml")
 
-    def install_secrets(self) -> None:
+    def install_secrets(self, force: bool = False) -> None:
+        missing = self._env.missing(credentials.GENERATORS)
+        if missing and not force:
+            self._refuse_to_replace_persisted_secrets(missing)
         added = self._env.fill_missing(credentials.GENERATORS)
         report.line(
             (f"{self._env.path}: ", "bold"), f"added {', '.join(added)}" if added else "nothing to add (all present)"
         )
         self._kube.apply_objects(credentials.kubernetes_secrets(self._env))
+
+    def _refuse_to_replace_persisted_secrets(self, missing: list[str]) -> None:
+        """New values for a lab that already has its Secrets wouldn't match its databases."""
+        found = [
+            f"{namespace}/{name}"
+            for name, namespace in credentials.PERSISTED_SECRETS
+            if self._kube.kubectl("get", "secret", name, "--ignore-not-found", "-o", "name", namespace=namespace)
+        ]
+        if found:
+            raise LabError(
+                f"{self._env.path} lacks {len(missing)} generated values, but the cluster already has "
+                f"{', '.join(found)}: new passwords wouldn't match the ones its databases started with. "
+                "Point LLM_BONSAI_HOME at the directory whose .env built this lab, or wipe the lab with "
+                "`llm-bonsai teardown` first. `llm-bonsai setup secrets --force` writes new ones anyway."
+            )
 
     def install_ollama(self) -> None:
         self._kube.helm_upgrade(OLLAMA)
@@ -184,7 +215,19 @@ class Installer:
 
     def uninstall(self) -> None:
         """Remove the lab's releases and data, keeping the cluster and its cluster-wide
-        prerequisites (cert-manager, the ClickHouse operator). Missing pieces are skipped."""
+        prerequisites (cert-manager, the ClickHouse operator). Missing pieces are skipped.
+
+        Refuses to start if a namespace it would empty wasn't created by llm-bonsai.
+        """
+        existing = self._kube.kubectl_json(
+            "get", "namespaces", LLM_NAMESPACE, OBSERVABILITY_NAMESPACE, "--ignore-not-found"
+        )
+        foreign = foreign_namespaces(existing.get("items", []))
+        if foreign:
+            raise LabError(
+                f"namespace {', '.join(foreign)} wasn't created by llm-bonsai (no {PART_OF_LABEL}={PART_OF} label), "
+                "so teardown won't delete its data. If it is this lab's, label it with `llm-bonsai setup namespaces`."
+            )
         helm, kubectl = self._kube.helm, self._kube.kubectl
         manifests = [str(infra_file(f)) for f in ("valkey/valkey.yaml", "postgres/postgres.yaml")]
         prometheus = str(infra_file("prometheus/prometheus.yaml"))
@@ -198,11 +241,21 @@ class Installer:
             partial(kubectl, "delete", "pvc", "--all", namespace=LLM_NAMESPACE),
             self.delete_orphaned_volumes,
         ]
+        skipped = False
         for step in steps:
             try:
                 report.console.print(step(), end="", soft_wrap=True)
             except LabError as error:
                 report.note(f"skipped: {error}")
+                skipped = True
+        if skipped:
+            report.note("kept the database Secrets: some of the data they protect may still be there")
+            return
+        # Their passwords belonged to the data just deleted, so the next `setup secrets` may write new ones.
+        for name, namespace in credentials.PERSISTED_SECRETS:
+            report.console.print(
+                kubectl("delete", "secret", name, "--ignore-not-found", namespace=namespace), end="", soft_wrap=True
+            )
 
     def delete_orphaned_volumes(self) -> str:
         """Delete what the provisioner may have left behind (see `orphaned_volumes`)."""
@@ -211,5 +264,5 @@ class Installer:
             return "no volumes left behind\n"
         self._kube.kubectl("delete", "pv", "--ignore-not-found", *names)
         if paths:
-            run("minikube", "ssh", "--", "sudo", "rm", "-rf", *paths)
+            run("minikube", "ssh", "-p", self._kube.config.minikube_profile, "--", "sudo", "rm", "-rf", *paths)
         return f"deleted {len(names)} leftover volumes and {len(paths)} data directories on the node\n"

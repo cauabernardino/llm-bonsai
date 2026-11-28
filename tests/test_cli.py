@@ -1,9 +1,10 @@
+import httpx
 import pytest
 import typer
 from typer.core import TyperGroup
 from typer.testing import CliRunner
 
-from llm_bonsai.cli import app
+from llm_bonsai.cli import app, describe
 from llm_bonsai.probe.cli import concurrency_levels
 
 
@@ -39,3 +40,24 @@ def test_concurrency_levels_are_sorted_and_deduplicated() -> None:
 def test_concurrency_levels_rejects_bad_input(value: str) -> None:
     with pytest.raises(typer.BadParameter):
         concurrency_levels(value)
+
+
+def failure(status: int, **body: object) -> httpx.HTTPStatusError:
+    request = httpx.Request("GET", "http://127.0.0.1:4000/user/info?key=sk-secret")
+    response = httpx.Response(status, json=body, request=request)
+    return httpx.HTTPStatusError("failed", request=request, response=response)
+
+
+def test_describe_shows_the_gateways_message_and_never_the_query() -> None:
+    line = describe(failure(401, error={"message": "Authentication Error, invalid key", "type": "auth_error"}))
+    assert line == "GET 127.0.0.1/user/info answered HTTP 401: Authentication Error, invalid key"
+
+
+def test_describe_falls_back_to_detail_or_text() -> None:
+    assert describe(failure(422, detail="Malformed request")).endswith("HTTP 422: Malformed request")
+    assert describe(failure(400, detail={"error": "Team not found"})).endswith("HTTP 400: Team not found")
+    request = httpx.Request("POST", "http://gateway/key/generate")
+    error = httpx.HTTPStatusError(
+        "x", request=request, response=httpx.Response(502, text="bad\ngateway", request=request)
+    )
+    assert describe(error).endswith("HTTP 502: bad gateway")

@@ -34,6 +34,11 @@ GENERATORS: dict[str, Callable[[], str]] = {
 }
 
 
+# The Secrets holding passwords that Postgres and ClickHouse keep from their first start:
+# replacing them breaks the lab until its volumes are wiped.
+PERSISTED_SECRETS = (("litellm-db", LLM_NAMESPACE), ("langfuse", OBSERVABILITY_NAMESPACE))
+
+
 def secret(name: str, namespace: str, data: dict[str, str]) -> dict[str, Any]:
     encoded = {key: base64.b64encode(value.encode()).decode() for key, value in data.items()}
     return {

@@ -1,0 +1,50 @@
+# Pushing a tag vX.Y.Z (stable versions only) on a commit of main publishes a GitHub Release with the built package. Its notes are the
+# commit titles since the previous tag, so the Releases page is the changelog.
+name: release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      UV_LOCKED: "1"
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0 # the notes need the previous tag
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v10.3.3
+      - name: The tag is on main and matches the package version
+        run: |
+          if ! git merge-base --is-ancestor "$TAG" origin/main; then
+            echo "::error::$TAG is not on main"
+            exit 1
+          fi
+          version="$(uv version --short)"
+          if [ "v$version" != "$TAG" ]; then
+            echo "::error::tag $TAG, but pyproject.toml says $version"
+            exit 1
+          fi
+      - run: make check
+      - run: uv build
+      - name: Notes from the commit titles since the previous release
+        run: |
+          previous="$(git describe --tags --abbrev=0 "$TAG^" 2>/dev/null || true)"
+          if [ -z "$previous" ]; then
+            echo "First release." > notes.md
+          else
+            git log --format='- %s' --invert-grep --grep='^Release ' "$previous..$TAG" > notes.md
+            printf '\n**Full diff:** https://github.com/%s/compare/%s...%s\n' "$GITHUB_REPOSITORY" "$previous" "$TAG" >> notes.md
+          fi
+          cat notes.md
+      - run: gh release create "$TAG" dist/* --title "$TAG" --notes-file notes.md --verify-tag
+        env:
+          GH_TOKEN: ${{ github.token }}

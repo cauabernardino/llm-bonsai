@@ -4,10 +4,11 @@ from typing import Any
 import pytest
 
 from llm_bonsai.clients.kube import Kube
-from llm_bonsai.config import CHECKOUT, INFRA, LabConfig, infra_file, lab_home
+from llm_bonsai.config import CHECKOUT, INFRA, EnvFile, LabConfig, infra_file, lab_home
 from llm_bonsai.errors import LabError
 from llm_bonsai.models import Chart
 from llm_bonsai.setup import infra
+from llm_bonsai.setup.credentials import GENERATORS
 
 CONFIG = LabConfig.from_environment()
 KUBE = Kube(LabConfig(home=CONFIG.home, kube_context="lab-ctx"))
@@ -92,3 +93,120 @@ def test_orphaned_volumes_are_the_lab_namespaces_pvs_and_their_minikube_director
         ["ollama", "keeper", "not-hostpath", "outside-root"],
         ["/tmp/hostpath-provisioner/llm/ollama", "/tmp/hostpath-provisioner/observability/keeper"],
     )
+
+
+def namespace(name: str, labels: dict[str, str] | None = None) -> dict[str, Any]:
+    return {"metadata": {"name": name, **({"labels": labels} if labels is not None else {})}}
+
+
+def test_teardown_only_empties_namespaces_llm_bonsai_created() -> None:
+    owned = namespace("llm", {"app.kubernetes.io/part-of": "llm-bonsai"})
+    unlabelled = namespace("observability")
+    someone_elses = namespace("observability", {"app.kubernetes.io/part-of": "their-stack"})
+    assert infra.foreign_namespaces([owned]) == []
+    assert infra.foreign_namespaces([owned, unlabelled]) == ["observability"]
+    assert infra.foreign_namespaces([someone_elses]) == ["observability"]
+
+
+def test_the_lab_uses_its_own_minikube_profile_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LLM_BONSAI_CONTEXT", raising=False)
+    config = LabConfig.from_environment()
+    assert config.kube_context == config.minikube_profile == "llm-bonsai"
+
+
+def test_every_minikube_command_names_the_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def record(*cmd: str, **kwargs: object) -> str:
+        calls.append(cmd)
+        return ""
+
+    monkeypatch.setattr(infra, "run", record)
+    infra.create_cluster("lab")
+    infra.delete_cluster("lab")
+    assert len(calls) == 3
+    assert all(call[0] == "minikube" and call[call.index("-p") + 1] == "lab" for call in calls)
+
+
+def test_a_missing_context_points_at_setup_cluster(monkeypatch: pytest.MonkeyPatch) -> None:
+    def contexts(*cmd: str, **kwargs: object) -> str:
+        return "minikube\nkind-dev\n"
+
+    monkeypatch.setattr("llm_bonsai.clients.kube.run", contexts)
+    with pytest.raises(LabError, match="setup cluster") as raised:
+        KUBE.require_context()
+    assert "LLM_BONSAI_CONTEXT=minikube" in str(raised.value)
+
+
+class FakeCluster:
+    """Answers the kubectl and helm calls of `setup secrets` and `teardown`: the named Secrets exist, nothing
+    else does, and any command naming a release in `failing` fails."""
+
+    def __init__(self, *secrets: str, failing: tuple[str, ...] = ()) -> None:
+        self.secrets = set(secrets)
+        self.failing = failing
+        self.applied = False
+
+    def run(self, *cmd: str, stdin: str | None = None, **kwargs: object) -> str:
+        if cmd[1:3] == ("config", "get-contexts"):
+            return "lab-ctx\n"
+        if any(release in cmd for release in self.failing):
+            raise LabError(f"{cmd[0]} failed")
+        if "apply" in cmd:
+            self.applied = True
+            return ""
+        if "secret" in cmd:
+            name = cmd[cmd.index("secret") + 1]
+            if "delete" in cmd:
+                self.secrets.discard(name)
+                return ""
+            return f"secret/{name}\n" if name in self.secrets else ""
+        if "get" in cmd:  # namespaces, persistent volumes
+            return '{"items": []}'
+        return ""
+
+
+def installer(monkeypatch: pytest.MonkeyPatch, cluster: FakeCluster, env: EnvFile) -> infra.Installer:
+    monkeypatch.setattr("llm_bonsai.clients.kube.run", cluster.run)
+    monkeypatch.setattr(infra, "run", cluster.run)
+    return infra.Installer(Kube(LabConfig(home=env.path.parent, kube_context="lab-ctx")), env)
+
+
+def install_secrets(monkeypatch: pytest.MonkeyPatch, cluster: FakeCluster, env: EnvFile, force: bool = False) -> None:
+    installer(monkeypatch, cluster, env).install_secrets(force)
+
+
+def test_secrets_refuses_a_fresh_env_for_a_lab_that_already_has_them(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cluster, env = FakeCluster("langfuse"), EnvFile(tmp_path / ".env")
+    with pytest.raises(LabError, match="observability/langfuse") as raised:
+        install_secrets(monkeypatch, cluster, env)
+    assert "LLM_BONSAI_HOME" in str(raised.value) and "--force" in str(raised.value)
+    assert not env.path.exists() and not cluster.applied
+
+
+def test_secrets_force_writes_new_values_anyway(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    cluster, env = FakeCluster("litellm-db", "langfuse"), EnvFile(tmp_path / ".env")
+    install_secrets(monkeypatch, cluster, env, force=True)
+    assert env.missing(GENERATORS) == [] and cluster.applied
+
+
+def test_secrets_reapplies_a_complete_env_without_asking(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    env = EnvFile(tmp_path / ".env")
+    env.fill_missing(GENERATORS)
+    cluster = FakeCluster("litellm-db", "langfuse")
+    install_secrets(monkeypatch, cluster, env)
+    assert cluster.applied
+
+
+def test_teardown_deletes_the_database_secrets_with_their_data(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    cluster = FakeCluster("litellm-db", "langfuse")
+    installer(monkeypatch, cluster, EnvFile(tmp_path / ".env")).uninstall()
+    assert cluster.secrets == set()
+
+
+def test_a_partial_teardown_keeps_the_database_secrets(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    cluster = FakeCluster("litellm-db", "langfuse", failing=("langfuse",))
+    installer(monkeypatch, cluster, EnvFile(tmp_path / ".env")).uninstall()
+    assert cluster.secrets == {"litellm-db", "langfuse"}

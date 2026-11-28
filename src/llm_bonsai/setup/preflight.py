@@ -89,7 +89,8 @@ class Host:
     free_disk_gib: float
     disk_path: str
     tools: dict[str, str | None]  # raw version output per tool name
-    current_context: str | None
+    lab_context: str  # the lab's kube context (and minikube profile)
+    lab_context_exists: bool
     orbstack: bool
 
 
@@ -205,7 +206,7 @@ def disk_to_check(docker: Docker | None) -> Path:
     return root if root.exists() else Path("/")
 
 
-def collect() -> Host:
+def collect(lab_context: str) -> Host:
     system = platform.system()
     docker = docker_info(system)
     disk = disk_to_check(docker)
@@ -223,7 +224,9 @@ def collect() -> Host:
         free_disk_gib=shutil.disk_usage(disk).free / GIB,
         disk_path=str(disk),
         tools={tool.name: tool_version(tool) for tool in TOOLS},
-        current_context=output_of(["kubectl", "config", "current-context"]),
+        lab_context=lab_context,
+        lab_context_exists=lab_context
+        in (output_of(["kubectl", "config", "get-contexts", "-o", "name"]) or "").split(),
         orbstack=shutil.which("orbctl") is not None,
     )
 
@@ -334,7 +337,7 @@ def render(host: Host, results: list[Check]) -> None:
         ("CPU", host.cpu),
         ("bf16", f"{bf16} (what vLLM on CPU wants, for the optional vLLM phase)"),
         ("Host RAM", f"{host.ram_gib:.0f} GiB" if host.ram_gib is not None else "unknown"),
-        ("kube context", host.current_context or "none"),
+        ("lab cluster", f"context {host.lab_context}: " + ("exists" if host.lab_context_exists else "not created yet")),
     )
 
     problems = [check for check in results if check.status is not Status.OK]
@@ -342,9 +345,15 @@ def render(host: Host, results: list[Check]) -> None:
         todo = [f"{check.name}: {check.fix or 'see the needs column'}" for check in problems]
         report.show(report.panel("Fix these first", report.bullets(todo), style="red"))
         return
+    if host.lab_context_exists:
+        first = f"The lab's cluster ({host.lab_context}) exists: install the lab with `llm-bonsai setup all`"
+    else:
+        first = (
+            f"Create the cluster: `llm-bonsai setup cluster` (minikube profile {host.lab_context} on Docker, "
+            f"{CLUSTER_CPUS} CPUs, {CLUSTER_MEMORY_GIB} GiB, {CLUSTER_DISK_GB} GB of disk)"
+        )
     nexts = [
-        f"Create the cluster: `llm-bonsai setup cluster` (minikube on Docker, {CLUSTER_CPUS} CPUs, "
-        f"{CLUSTER_MEMORY_GIB} GiB, {CLUSTER_DISK_GB} GB of disk)",
+        first,
         *(f"{check.name}: {check.fix}" for check in problems if check.fix),
     ]
     if host.orbstack:
@@ -354,9 +363,9 @@ def render(host: Host, results: list[Check]) -> None:
     report.show(report.panel("Ready", report.bullets(nexts), style="green"))
 
 
-def run() -> bool:
+def run(lab_context: str) -> bool:
     """Print the checks; True when no hard requirement failed."""
-    host = collect()
+    host = collect(lab_context)
     results = checks(host)
     render(host, results)
     return all(check.status is not Status.FAIL for check in results)

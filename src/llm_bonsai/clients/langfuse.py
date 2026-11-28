@@ -61,10 +61,6 @@ class Langfuse:
             )
         return self._sdk
 
-    def browser_url(self, url: str) -> str:
-        """An SDK-made URL (which points at this command's random tunnel port) as `llm-bonsai ui` serves it."""
-        return url.replace(self.base_url, LANGFUSE_UI_URL, 1)
-
     def close(self) -> None:
         if self._sdk is not None:
             self._sdk.shutdown()

@@ -49,13 +49,27 @@ class GatewayAdmin:
         created = self._http.post("/team/new", json={"team_alias": alias, "models": models}).raise_for_status()
         return str(created.json()["team_id"])
 
+    def _key_row(self, key: str) -> dict[str, Any] | None:
+        """The key's row, or None if the gateway has no live key by that value.
+
+        v2 takes the key in the body, which keeps it out of access logs; v1's GET /key/info
+        also answers for deleted keys, from their archive.
+        """
+        rows: list[dict[str, Any]] = (
+            self._http.post("/v2/key/info", json={"keys": [key]}).raise_for_status().json()["info"]
+        )
+        return rows[0] if rows else None
+
     def key_is_valid(self, key: str) -> bool:
-        return self._http.get("/key/info", params={"key": key}).status_code == 200
+        row = self._key_row(key)
+        return row is not None and not row.get("blocked")
 
     def key_spend(self, key: str) -> float:
         """The spend Postgres has recorded for a key so far."""
-        info = self._http.get("/key/info", params={"key": key}).raise_for_status().json()
-        return float(info["info"]["spend"])
+        row = self._key_row(key)
+        if row is None:
+            raise LabError("the gateway has no live key by that value")
+        return float(row["spend"])
 
     def generate_key(self, team_id: str, alias: str, **limits: Any) -> str:
         response = self._http.post("/key/generate", json={"team_id": team_id, "key_alias": alias, **limits})

@@ -12,15 +12,33 @@ from llm_bonsai.errors import LabError
 from llm_bonsai.models import Chart
 
 
+def missing_context(context: str) -> str:
+    return (
+        f"no kube context {context!r}: create the lab's cluster with `llm-bonsai setup cluster`. "
+        "A lab created by an earlier llm-bonsai runs in the `minikube` context instead: "
+        "`export LLM_BONSAI_CONTEXT=minikube`."
+    )
+
+
 class Kube:
     def __init__(self, config: LabConfig) -> None:
         self.config = config
+        self._context_found = False
+
+    def require_context(self) -> None:
+        """Fail with a pointer to `setup cluster` instead of kubectl's own error when the lab's context is missing."""
+        if self._context_found:
+            return
+        if self.config.kube_context not in run("kubectl", "config", "get-contexts", "-o", "name").split():
+            raise LabError(missing_context(self.config.kube_context))
+        self._context_found = True
 
     def kubectl_argv(self, namespace: str | None = None) -> list[str]:
         scope = ["-n", namespace] if namespace else []
         return ["kubectl", "--context", self.config.kube_context, *scope]
 
     def kubectl(self, *args: str, namespace: str | None = None, stdin: str | None = None) -> str:
+        self.require_context()
         return run(*self.kubectl_argv(namespace), *args, stdin=stdin)
 
     def kubectl_json(self, *args: str, namespace: str | None = None) -> Any:
@@ -62,6 +80,7 @@ class Kube:
         self.kubectl("wait", "--for=condition=Established", "--timeout=120s", *(f"crd/{crd}" for crd in crds))
 
     def helm(self, *args: str, capture: bool = True) -> str:
+        self.require_context()
         return run("helm", "--kube-context", self.config.kube_context, *args, capture=capture)
 
     def upgrade_args(self, chart: Chart, set_values: Iterable[str] = ()) -> list[str]:

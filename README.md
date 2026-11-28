@@ -1,5 +1,7 @@
 # llm-bonsai
 
+[![check](https://github.com/cauabernardino/llm-bonsai/actions/workflows/check.yml/badge.svg)](https://github.com/cauabernardino/llm-bonsai/actions/workflows/check.yml)
+
 > A real GenAI platform, deliberately kept tiny. Same structure, carefully pruned to fit small machines.
 
 llm-bonsai runs the core of a GenAI platform in a local Kubernetes cluster, with **no paid API keys**:
@@ -43,14 +45,16 @@ flowchart LR
 | Disk | ≥ 40 GiB free where Docker keeps its data |
 | Tools | `kubectl` ≥ 1.36, `helm` ≥ 3.8, `minikube` ≥ 1.39, plus [`uv`](https://docs.astral.sh/uv/) to install the CLI |
 
-The cluster takes 14 GiB; see the [memory budget](#memory-budget). **Tested end to end on** macOS 26 on Apple Silicon (24 GB, Docker Desktop with Docker Engine 29.9, kubectl 1.37, helm 4.3, minikube 1.39). Preflight's Linux and WSL2 rules are covered by unit tests, but nobody has run the whole lab on Linux yet; reports are welcome.
+The cluster takes 14 GiB; see the [memory budget](#memory-budget). **Tested end to end on** macOS 26 on Apple Silicon (24 GB, Docker Desktop with Docker Engine 29.9, kubectl 1.37, helm 4.3, minikube 1.39). Preflight's Linux and WSL2 rules are covered by unit tests, but nobody has run the whole lab on Linux yet; a [run report](https://github.com/cauabernardino/llm-bonsai/issues/new?template=run-report.yml) is welcome.
 
-Install the tools, then the CLI from a checkout:
+Install the tools, then the CLI:
 
 ```bash
 brew install kubernetes-cli helm minikube uv   # macOS; on Linux use the links below
-uv tool install .                              # puts `llm-bonsai` on your PATH
+uv tool install git+https://github.com/cauabernardino/llm-bonsai   # puts `llm-bonsai` on your PATH
 ```
+
+The installed CLI keeps its `.env` in `~/.config/llm-bonsai/`. To change the code or run the tests, clone the repo instead and run `uv sync`; commands then run as `uv run llm-bonsai …`, with `.env` in the checkout. The two are separate labs' credentials: see [Lab home](#lab-home) and [CONTRIBUTING.md](CONTRIBUTING.md).
 
 On Linux: [Docker Engine](https://docs.docker.com/engine/install/), [kubectl](https://kubernetes.io/docs/tasks/tools/install-kubectl-linux/), [helm](https://helm.sh/docs/intro/install/), [minikube](https://minikube.sigs.k8s.io/docs/start/) and [uv](https://docs.astral.sh/uv/getting-started/installation/). On macOS, use Homebrew's `kubectl`: the one Docker Desktop ships can be too old for the cluster.
 
@@ -58,7 +62,7 @@ Then build and check the lab:
 
 ```bash
 llm-bonsai setup preflight   # read-only machine check, ends with a recommendation
-llm-bonsai setup cluster     # minikube: 6 CPUs, 14 GB of RAM, 40 GB of disk, metrics-server
+llm-bonsai setup cluster     # its own minikube profile, llm-bonsai: 6 CPUs, 14 GB of RAM, 40 GB of disk
 llm-bonsai setup all         # Ollama, Postgres, Valkey, Langfuse (+ prerequisites), LiteLLM; ~6 min the first time
 llm-bonsai setup teams       # two teams with one virtual key each, saved to .env
 llm-bonsai probe smoke       # end-to-end check: chat, streaming, embeddings, model access, traces
@@ -79,7 +83,7 @@ all smoke checks passed
 
 To tear down: `llm-bonsai teardown` uninstalls the lab and its data but keeps the cluster; `llm-bonsai teardown --cluster` deletes the cluster. Both ask first.
 
-Every step is idempotent and can run on its own (`llm-bonsai setup --help`). Every `kubectl` and `helm` call the CLI makes is pinned to the `minikube` context (`LLM_BONSAI_CONTEXT` overrides it). Secrets are random dev values in `.env`, generated once and never rotated; `.env.example` lists them, and [Lab home](#lab-home) says where the file lives.
+Every step is idempotent and can run on its own (`llm-bonsai setup --help`). **The lab keeps to itself:** it runs in its own minikube profile and kube context, both named `llm-bonsai`, and every `kubectl`, `helm` and `minikube` call the CLI makes names them, so other clusters on your machine are never touched. `teardown` also refuses to empty a namespace it didn't create. `setup cluster` also makes `llm-bonsai` kubectl's current context, which the plain `kubectl` commands in this README assume. `LLM_BONSAI_CONTEXT` picks another context; a lab created by an earlier version runs in `minikube`, so use `export LLM_BONSAI_CONTEXT=minikube` for it. Secrets are random dev values in `.env`, generated once and never rotated; `.env.example` lists them, and [Lab home](#lab-home) says where the file lives.
 
 **Working in the checkout?** Prefix commands with `uv run` (`uv run llm-bonsai probe smoke`), or use the Makefile shortcuts: `make up` (`setup all`), `make bootstrap` (`setup teams`), `make smoke`, `make ui`, `make down` (`teardown`), `make nuke` (`teardown --cluster`), and `make check` for lint, types and tests.
 
@@ -101,7 +105,7 @@ Each probe opens its own port-forwards, so nothing else has to be running. Each 
 
 ### Where to look
 
-`llm-bonsai ui` forwards these to your machine until Ctrl-C. The credentials are in `.env`.
+`llm-bonsai ui` forwards these to your machine until Ctrl-C. The credentials are in `.env`. The ports are fixed, unlike the probes' tunnels: Langfuse only accepts logins on the URL it was installed with (`NEXTAUTH_URL=http://localhost:3000`).
 
 | What | URL | Log in with |
 |---|---|---|
@@ -143,7 +147,7 @@ Replies stream token by token. The CLI keeps the history and sends it with every
 With `llm-bonsai ui` running in another terminal:
 
 ```bash
-set -a; . ./.env; set +a     # load the keys (sourcing strips the quotes .env stores them with)
+set -a; . ~/.config/llm-bonsai/.env; set +a   # load the keys (./.env in a checkout); sourcing strips their quotes
 
 curl localhost:4000/v1/chat/completions \
   -H "Authorization: Bearer $LITELLM_KEY_SUPPORT_BOT" -H 'Content-Type: application/json' \
@@ -290,7 +294,7 @@ Part 1: rate limit, 10 requests in a row
 Part 2: budget $0.05
   #1  HTTP 200  $0.0096 → $0.0522  ← crossed $0.05, still allowed
   #2  HTTP 422  Budget has been exceeded
-Spend in Postgres (/key/info) right now: $0.0096
+Spend in Postgres (/v2/key/info) right now: $0.0096
 ```
 
 - **429** for rate limits: back off and retry. **422** for budgets: retrying won't help until someone raises the budget.
@@ -409,12 +413,12 @@ The CLI ships its Helm values and manifests inside the package (`src/llm_bonsai/
 2. else the checkout, when running from one with `uv run`;
 3. else `~/.config/llm-bonsai/` (or `$XDG_CONFIG_HOME/llm-bonsai/`), which is where an installed CLI keeps it.
 
-**A different lab home means a different `.env`.** `setup secrets` against an already running lab with a fresh `.env` applies new passwords that no longer match the existing databases. To drive a lab you built with `uv run` from the installed CLI, run `export LLM_BONSAI_HOME=/path/to/llm-bonsai`.
+**A different lab home means a different `.env`.** New passwords for a running lab wouldn't match its databases, so `setup secrets` refuses to generate them while the lab's Secrets exist (`--force` overrides). To drive a lab you built with `uv run` from the installed CLI, run `export LLM_BONSAI_HOME=/path/to/llm-bonsai`.
 
 ## Repository layout
 
 ```
-Makefile                  shortcuts for the CLI, plus `make check` (ruff, mypy --strict, pytest)
+Makefile                  shortcuts for the CLI, plus `make check` (ruff, mypy and pyright strict, pytest)
 src/llm_bonsai/           the package behind the `llm-bonsai` command
   infra/                  what the CLI installs (Helm values, plain manifests); ships in the wheel
   cli.py                  root command: setup / probe / ui / teardown
@@ -454,7 +458,7 @@ Prometheus is the only optional piece today, and `setup all` doesn't install it.
 | Symptom | Cause | Fix |
 |---|---|---|
 | LiteLLM exits immediately with **code 132**, no logs | `Illegal instruction`: older Docker Desktop VMs on Apple Silicon advertise SVE2, which the chip lacks. Check with `docker run --rm python:3.13-slim python -c "import ctypes; print(bool(ctypes.CDLL(None).getauxval(26) & 2))"` (`True` = affected). | Update Docker Desktop, then `llm-bonsai teardown --cluster`, `setup cluster` and `setup all`. |
-| The whole cluster stops; `docker inspect minikube` shows `OOMKilled=true` | The Docker VM barely exceeds minikube's limit, so the VM itself runs out. | Give Docker Desktop ≥ 17 GB. That restarts its VM and stops minikube, so then run `minikube start`. |
+| The whole cluster stops; `docker inspect llm-bonsai` shows `OOMKilled=true` | The Docker VM barely exceeds minikube's limit, so the VM itself runs out. | Give Docker Desktop ≥ 17 GB. That restarts its VM and stops minikube, so then run `minikube start -p llm-bonsai`. |
 | LiteLLM `OOMKilled` / `CrashLoopBackOff` | It needs ~1.8 GiB to start, though it settles at ~1.2 GiB. | Keep its limit ≥ 2.5 GiB. |
 | After `teardown` + `setup all`, ClickHouse crash-loops with `Coordination error: Not authenticated` | Old data came back: minikube's provisioner only deletes volumes it created since its last restart, and a same-name claim reuses the old directory. | `teardown` now removes leftover volumes; run it again, then `setup all`. |
 | `langfuse-web` crash-loops right after install: `lookup langfuse-clickhouse-headless ... no such host` | ClickHouse isn't up yet. | Wait 1–2 min; else `kubectl get clickhousecluster,keepercluster -n observability`. |
@@ -464,13 +468,16 @@ Prometheus is the only optional piece today, and `setup all` doesn't install it.
 | `helm upgrade`: `another operation ... is in progress` | An interrupted `helm` run left the release pending. | If it was the first install: `helm uninstall litellm -n llm`, then `setup litellm`. |
 | `helm upgrade`: `conflict with "kubectl-set"` | Helm 4 uses server-side apply, and a field was edited by hand. | Undo the edit, or run the upgrade once with `--force-conflicts`. |
 | Embeddings: 400 `encoding_format ... not supported by ollama` | The OpenAI SDK's default base64 encoding. | Keep `drop_params: true`, or send `encoding_format="float"`. |
-| `could not port-forward svc/...` | The cluster is down, or the lab isn't installed. | `minikube start`, or `llm-bonsai setup all`. |
+| `could not port-forward svc/...` | The cluster is down, or the lab isn't installed. | `minikube start -p llm-bonsai`, or `llm-bonsai setup all`. |
+| `no kube context 'llm-bonsai'` | The lab's cluster doesn't exist yet, or it was created by an earlier version in the `minikube` profile. | `llm-bonsai setup cluster`, or `export LLM_BONSAI_CONTEXT=minikube`. |
+| `teardown`: `namespace … wasn't created by llm-bonsai` | `llm` or `observability` exists without the lab's label: someone else's, or created by an earlier version. | If it's the lab's, `llm-bonsai setup namespaces` labels it; otherwise leave it alone. |
+| `setup secrets`: `… lacks N generated values, but the cluster already has …` | `.env` is new or incomplete (a different lab home, or the file was lost) while the lab's database passwords are still in the cluster. | Set `LLM_BONSAI_HOME` to the directory with the original `.env`. If it's gone, `llm-bonsai teardown` (which wipes the data) and then `setup all`. |
 | A probe says `the gateway didn't answer` | The gateway pod is restarting or still starting. | `kubectl -n llm get pods` and the gateway's logs. |
 | 2 gateway replicas left running after killing `probe replicas` | It restores on errors and a single Ctrl-C, not when killed outright. | `llm-bonsai setup litellm`. |
 | `connection refused` on `localhost:3000`, `:4000` or `:9090` | Only `llm-bonsai ui` forwards those ports. | Run `llm-bonsai ui`. |
-| `llm-bonsai ui`: `port ... already in use` | Usually a leftover `kubectl port-forward`. | `pkill -f 'port-forward svc/'`, then `llm-bonsai ui`. |
+| `llm-bonsai ui`: `port ... already in use` | Usually a leftover `kubectl port-forward`, or a dev server on 3000. | `pkill -f 'port-forward svc/'`, or free the port (`lsof -i :3000`), then `llm-bonsai ui`. |
 | `curl … /metrics` prints nothing | The 307 redirect to `/metrics/`. | Add `-L`, or use `/metrics/`. |
-| 401 with `Received='sk-****…', expected to start with 'sk-'` | The key was read from `.env` with its quotes (e.g. via `cut`). | `. ./.env` instead. |
+| 401 with `Received='sk-****…', expected to start with 'sk-'` | The key was read from `.env` with its quotes (e.g. via `cut`). | Source the file instead: `set -a; . <lab home>/.env; set +a`. |
 | `probe app` / `probe eval`: `NotFoundError` from Langfuse | Langfuse was reset while a run started. | Re-run; the probes recreate the prompt and dataset. |
 | `kubectl top` shows tiny or stale numbers | metrics-server lags up to a minute. | Wait and retry. |
 | Odd `kubectl` errors | The client is more than one minor version from the server. | `brew install kubernetes-cli`; check `which kubectl`. |
@@ -478,6 +485,14 @@ Prometheus is the only optional piece today, and `setup all` doesn't install it.
 ## Security notes
 
 All credentials are random, dev-only values in a gitignored `.env`. Nothing listens beyond `localhost`: access goes only through `kubectl port-forward`, opened per command. The gateway's Valkey runs without auth inside the cluster. No real provider keys are needed or used; a cloud model would only ever appear as a commented-out entry in `src/llm_bonsai/infra/litellm/values.yaml`, reading its key from the environment.
+
+## Changelog
+
+Each version's changes are on the [Releases](https://github.com/cauabernardino/llm-bonsai/releases) page.
+
+## License
+
+[Apache License 2.0](LICENSE). Use, change and share it as you like, including commercially. If you redistribute it or something built on it, keep the [NOTICE](NOTICE) file with it, which credits the original project, and mark the files you changed.
 
 ## Pinned versions
 

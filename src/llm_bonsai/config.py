@@ -1,7 +1,7 @@
 """Where the lab lives: its home (holding .env), the manifests it installs, and the cluster context."""
 
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -9,6 +9,8 @@ from dotenv import dotenv_values, set_key
 
 from llm_bonsai.errors import LabError
 
+# A profile of its own, so the lab never touches another minikube cluster on the machine.
+DEFAULT_CONTEXT = "llm-bonsai"
 PACKAGE = Path(__file__).resolve().parent
 # Helm values and manifests ship inside the package. kubectl and helm need real files,
 # which pip and uv always provide: they install wheels unzipped.
@@ -54,11 +56,14 @@ class EnvFile:
         self._create()
         set_key(self.path, name, value)
 
+    def missing(self, names: Iterable[str]) -> list[str]:
+        existing = dotenv_values(self.path) if self.path.exists() else {}
+        return [name for name in names if not existing.get(name)]
+
     def fill_missing(self, generators: Mapping[str, Callable[[], str]]) -> list[str]:
         """Generate the values that are missing and return their names; existing ones are kept."""
+        added = self.missing(generators)
         self._create()
-        existing = dotenv_values(self.path)
-        added = [name for name in generators if not existing.get(name)]
         for name in added:
             set_key(self.path, name, generators[name]())
         return added
@@ -72,12 +77,17 @@ class EnvFile:
 class LabConfig:
     home: Path
     # Every kubectl/helm call is pinned to this context, so a command can never act on
-    # whatever other cluster happens to be current.
+    # whatever other cluster happens to be current. It is also the lab's minikube profile:
+    # minikube names a profile's context after the profile.
     kube_context: str
 
     @classmethod
     def from_environment(cls) -> "LabConfig":
-        return cls(home=lab_home(os.environ), kube_context=os.environ.get("LLM_BONSAI_CONTEXT", "minikube"))
+        return cls(home=lab_home(os.environ), kube_context=os.environ.get("LLM_BONSAI_CONTEXT", DEFAULT_CONTEXT))
+
+    @property
+    def minikube_profile(self) -> str:
+        return self.kube_context
 
     @property
     def env(self) -> EnvFile:
