@@ -13,16 +13,16 @@ app = typer.Typer(
 
 
 @app.command("preflight")
-def preflight_command() -> None:
+def preflight_command(ctx: typer.Context) -> None:
     """Check the host against the hard requirements (OS, Docker memory and CPUs, disk, tool versions). Read-only."""
-    if not preflight.run():
+    if not preflight.run(Lab.of(ctx).config.kube_context):
         raise typer.Exit(code=1)
 
 
 @app.command("cluster")
-def cluster() -> None:
-    """Start minikube with 6 CPUs, 14 GiB and 40 GB of disk, plus metrics-server."""
-    infra.create_cluster()
+def cluster(ctx: typer.Context) -> None:
+    """Start the lab's own minikube profile (6 CPUs, 14 GiB, 40 GB of disk), plus metrics-server."""
+    infra.create_cluster(Lab.of(ctx).config.minikube_profile)
 
 
 @app.command("namespaces")

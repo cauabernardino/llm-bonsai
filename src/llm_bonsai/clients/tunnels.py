@@ -41,6 +41,7 @@ class PortForward:
 
     def __init__(self, kube: Kube, service: Service, local_port: int | None = None) -> None:
         self.service = service
+        self._kube = kube
         self.local_port = local_port or free_local_port()
         self._argv = [
             *kube.kubectl_argv(service.namespace),
@@ -59,6 +60,7 @@ class PortForward:
         return f"http://localhost:{self.local_port}"
 
     def open(self, timeout_s: float = 20) -> None:
+        self._kube.require_context()
         self._watcher.start()
         self._wait_until_listening(timeout_s)
 

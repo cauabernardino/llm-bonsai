@@ -20,7 +20,7 @@ LINUX = Host(
     system="Linux", wsl=False, os_name="Ubuntu 24.04 LTS", arch="x86_64", cpu="AMD Ryzen 9", bf16=True, ram_gib=31.0,
     docker=LINUX_DOCKER, docker_cli=True, free_disk_gib=200.0, disk_path="/var/lib/docker",
     tools={"kubectl": "v1.37.3", "helm": "v4.3.2+g1a2b3c", "minikube": "minikube version: v1.39.0"},
-    current_context=None, orbstack=False,
+    lab_context="llm-bonsai", lab_context_exists=False, orbstack=False,
 )  # fmt: skip
 MAC_DOCKER = replace(LINUX_DOCKER, memory_gib=16.6, cpus=14, in_vm=True)
 MAC = replace(

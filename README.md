@@ -58,7 +58,7 @@ Then build and check the lab:
 
 ```bash
 llm-bonsai setup preflight   # read-only machine check, ends with a recommendation
-llm-bonsai setup cluster     # minikube: 6 CPUs, 14 GB of RAM, 40 GB of disk, metrics-server
+llm-bonsai setup cluster     # its own minikube profile, llm-bonsai: 6 CPUs, 14 GB of RAM, 40 GB of disk
 llm-bonsai setup all         # Ollama, Postgres, Valkey, Langfuse (+ prerequisites), LiteLLM; ~6 min the first time
 llm-bonsai setup teams       # two teams with one virtual key each, saved to .env
 llm-bonsai probe smoke       # end-to-end check: chat, streaming, embeddings, model access, traces
@@ -79,7 +79,7 @@ all smoke checks passed
 
 To tear down: `llm-bonsai teardown` uninstalls the lab and its data but keeps the cluster; `llm-bonsai teardown --cluster` deletes the cluster. Both ask first.
 
-Every step is idempotent and can run on its own (`llm-bonsai setup --help`). Every `kubectl` and `helm` call the CLI makes is pinned to the `minikube` context (`LLM_BONSAI_CONTEXT` overrides it). Secrets are random dev values in `.env`, generated once and never rotated; `.env.example` lists them, and [Lab home](#lab-home) says where the file lives.
+Every step is idempotent and can run on its own (`llm-bonsai setup --help`). **The lab keeps to itself:** it runs in its own minikube profile and kube context, both named `llm-bonsai`, and every `kubectl`, `helm` and `minikube` call the CLI makes names them, so other clusters on your machine are never touched. `teardown` also refuses to empty a namespace it didn't create. `setup cluster` also makes `llm-bonsai` kubectl's current context, which the plain `kubectl` commands in this README assume. `LLM_BONSAI_CONTEXT` picks another context; a lab created by an earlier version runs in `minikube`, so use `export LLM_BONSAI_CONTEXT=minikube` for it. Secrets are random dev values in `.env`, generated once and never rotated; `.env.example` lists them, and [Lab home](#lab-home) says where the file lives.
 
 **Working in the checkout?** Prefix commands with `uv run` (`uv run llm-bonsai probe smoke`), or use the Makefile shortcuts: `make up` (`setup all`), `make bootstrap` (`setup teams`), `make smoke`, `make ui`, `make down` (`teardown`), `make nuke` (`teardown --cluster`), and `make check` for lint, types and tests.
 
@@ -454,7 +454,7 @@ Prometheus is the only optional piece today, and `setup all` doesn't install it.
 | Symptom | Cause | Fix |
 |---|---|---|
 | LiteLLM exits immediately with **code 132**, no logs | `Illegal instruction`: older Docker Desktop VMs on Apple Silicon advertise SVE2, which the chip lacks. Check with `docker run --rm python:3.13-slim python -c "import ctypes; print(bool(ctypes.CDLL(None).getauxval(26) & 2))"` (`True` = affected). | Update Docker Desktop, then `llm-bonsai teardown --cluster`, `setup cluster` and `setup all`. |
-| The whole cluster stops; `docker inspect minikube` shows `OOMKilled=true` | The Docker VM barely exceeds minikube's limit, so the VM itself runs out. | Give Docker Desktop ≥ 17 GB. That restarts its VM and stops minikube, so then run `minikube start`. |
+| The whole cluster stops; `docker inspect llm-bonsai` shows `OOMKilled=true` | The Docker VM barely exceeds minikube's limit, so the VM itself runs out. | Give Docker Desktop ≥ 17 GB. That restarts its VM and stops minikube, so then run `minikube start -p llm-bonsai`. |
 | LiteLLM `OOMKilled` / `CrashLoopBackOff` | It needs ~1.8 GiB to start, though it settles at ~1.2 GiB. | Keep its limit ≥ 2.5 GiB. |
 | After `teardown` + `setup all`, ClickHouse crash-loops with `Coordination error: Not authenticated` | Old data came back: minikube's provisioner only deletes volumes it created since its last restart, and a same-name claim reuses the old directory. | `teardown` now removes leftover volumes; run it again, then `setup all`. |
 | `langfuse-web` crash-loops right after install: `lookup langfuse-clickhouse-headless ... no such host` | ClickHouse isn't up yet. | Wait 1–2 min; else `kubectl get clickhousecluster,keepercluster -n observability`. |
@@ -464,7 +464,9 @@ Prometheus is the only optional piece today, and `setup all` doesn't install it.
 | `helm upgrade`: `another operation ... is in progress` | An interrupted `helm` run left the release pending. | If it was the first install: `helm uninstall litellm -n llm`, then `setup litellm`. |
 | `helm upgrade`: `conflict with "kubectl-set"` | Helm 4 uses server-side apply, and a field was edited by hand. | Undo the edit, or run the upgrade once with `--force-conflicts`. |
 | Embeddings: 400 `encoding_format ... not supported by ollama` | The OpenAI SDK's default base64 encoding. | Keep `drop_params: true`, or send `encoding_format="float"`. |
-| `could not port-forward svc/...` | The cluster is down, or the lab isn't installed. | `minikube start`, or `llm-bonsai setup all`. |
+| `could not port-forward svc/...` | The cluster is down, or the lab isn't installed. | `minikube start -p llm-bonsai`, or `llm-bonsai setup all`. |
+| `no kube context 'llm-bonsai'` | The lab's cluster doesn't exist yet, or it was created by an earlier version in the `minikube` profile. | `llm-bonsai setup cluster`, or `export LLM_BONSAI_CONTEXT=minikube`. |
+| `teardown`: `namespace … wasn't created by llm-bonsai` | `llm` or `observability` exists without the lab's label: someone else's, or created by an earlier version. | If it's the lab's, `llm-bonsai setup namespaces` labels it; otherwise leave it alone. |
 | A probe says `the gateway didn't answer` | The gateway pod is restarting or still starting. | `kubectl -n llm get pods` and the gateway's logs. |
 | 2 gateway replicas left running after killing `probe replicas` | It restores on errors and a single Ctrl-C, not when killed outright. | `llm-bonsai setup litellm`. |
 | `connection refused` on `localhost:3000`, `:4000` or `:9090` | Only `llm-bonsai ui` forwards those ports. | Run `llm-bonsai ui`. |

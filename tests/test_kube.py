@@ -92,3 +92,43 @@ def test_orphaned_volumes_are_the_lab_namespaces_pvs_and_their_minikube_director
         ["ollama", "keeper", "not-hostpath", "outside-root"],
         ["/tmp/hostpath-provisioner/llm/ollama", "/tmp/hostpath-provisioner/observability/keeper"],
     )
+
+
+def namespace(name: str, labels: dict[str, str] | None = None) -> dict[str, Any]:
+    return {"metadata": {"name": name, **({"labels": labels} if labels is not None else {})}}
+
+
+def test_teardown_only_empties_namespaces_llm_bonsai_created() -> None:
+    owned = namespace("llm", {"app.kubernetes.io/part-of": "llm-bonsai"})
+    unlabelled = namespace("observability")
+    someone_elses = namespace("observability", {"app.kubernetes.io/part-of": "their-stack"})
+    assert infra.foreign_namespaces([owned]) == []
+    assert infra.foreign_namespaces([owned, unlabelled]) == ["observability"]
+    assert infra.foreign_namespaces([someone_elses]) == ["observability"]
+
+
+def test_the_lab_uses_its_own_minikube_profile_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LLM_BONSAI_CONTEXT", raising=False)
+    config = LabConfig.from_environment()
+    assert config.kube_context == config.minikube_profile == "llm-bonsai"
+
+
+def test_every_minikube_command_names_the_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def record(*cmd: str, **kwargs: object) -> str:
+        calls.append(cmd)
+        return ""
+
+    monkeypatch.setattr(infra, "run", record)
+    infra.create_cluster("lab")
+    infra.delete_cluster("lab")
+    assert len(calls) == 3
+    assert all(call[0] == "minikube" and call[call.index("-p") + 1] == "lab" for call in calls)
+
+
+def test_a_missing_context_points_at_setup_cluster(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("llm_bonsai.clients.kube.run", lambda *cmd, **kwargs: "minikube\nkind-dev\n")
+    with pytest.raises(LabError, match="setup cluster") as raised:
+        KUBE.require_context()
+    assert "LLM_BONSAI_CONTEXT=minikube" in str(raised.value)

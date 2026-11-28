@@ -92,17 +92,30 @@ def orphaned_volumes(volumes: Iterable[dict[str, Any]]) -> tuple[list[str], list
     return names, paths
 
 
-def create_cluster() -> None:
+PART_OF_LABEL = "app.kubernetes.io/part-of"
+PART_OF = "llm-bonsai"
+
+
+def create_cluster(profile: str) -> None:
     run(
-        "minikube", "start", "--driver=docker", f"--kubernetes-version={KUBERNETES_VERSION}", f"--cpus={CLUSTER_CPUS}",
-        f"--memory={CLUSTER_MEMORY_GIB}g", f"--disk-size={CLUSTER_DISK_GB}g",
+        "minikube", "start", "-p", profile, "--driver=docker", f"--kubernetes-version={KUBERNETES_VERSION}",
+        f"--cpus={CLUSTER_CPUS}", f"--memory={CLUSTER_MEMORY_GIB}g", f"--disk-size={CLUSTER_DISK_GB}g",
         capture=False,
     )  # fmt: skip
-    run("minikube", "addons", "enable", "metrics-server", capture=False)
+    run("minikube", "addons", "enable", "metrics-server", "-p", profile, capture=False)
 
 
-def delete_cluster() -> None:
-    run("minikube", "delete", capture=False)
+def delete_cluster(profile: str) -> None:
+    run("minikube", "delete", "-p", profile, capture=False)
+
+
+def foreign_namespaces(namespaces: Iterable[dict[str, Any]]) -> list[str]:
+    """The lab's namespaces that exist but weren't created by llm-bonsai, so teardown must not empty them."""
+    return [
+        namespace["metadata"]["name"]
+        for namespace in namespaces
+        if namespace["metadata"].get("labels", {}).get(PART_OF_LABEL) != PART_OF
+    ]
 
 
 class Installer:
@@ -184,7 +197,19 @@ class Installer:
 
     def uninstall(self) -> None:
         """Remove the lab's releases and data, keeping the cluster and its cluster-wide
-        prerequisites (cert-manager, the ClickHouse operator). Missing pieces are skipped."""
+        prerequisites (cert-manager, the ClickHouse operator). Missing pieces are skipped.
+
+        Refuses to start if a namespace it would empty wasn't created by llm-bonsai.
+        """
+        existing = self._kube.kubectl_json(
+            "get", "namespaces", LLM_NAMESPACE, OBSERVABILITY_NAMESPACE, "--ignore-not-found"
+        )
+        foreign = foreign_namespaces(existing.get("items", []))
+        if foreign:
+            raise LabError(
+                f"namespace {', '.join(foreign)} wasn't created by llm-bonsai (no {PART_OF_LABEL}={PART_OF} label), "
+                "so teardown won't delete its data. If it is this lab's, label it with `llm-bonsai setup namespaces`."
+            )
         helm, kubectl = self._kube.helm, self._kube.kubectl
         manifests = [str(infra_file(f)) for f in ("valkey/valkey.yaml", "postgres/postgres.yaml")]
         prometheus = str(infra_file("prometheus/prometheus.yaml"))
@@ -211,5 +236,5 @@ class Installer:
             return "no volumes left behind\n"
         self._kube.kubectl("delete", "pv", "--ignore-not-found", *names)
         if paths:
-            run("minikube", "ssh", "--", "sudo", "rm", "-rf", *paths)
+            run("minikube", "ssh", "-p", self._kube.config.minikube_profile, "--", "sudo", "rm", "-rf", *paths)
         return f"deleted {len(names)} leftover volumes and {len(paths)} data directories on the node\n"

@@ -99,15 +99,18 @@ def chat_command(
 @app.command("teardown")
 def teardown(
     ctx: typer.Context,
-    cluster: Annotated[bool, typer.Option("--cluster", help="Delete the whole minikube cluster instead.")] = False,
+    cluster: Annotated[
+        bool, typer.Option("--cluster", help="Delete the lab's whole minikube profile instead.")
+    ] = False,
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Don't ask for confirmation.")] = False,
 ) -> None:
     """Uninstall the lab and all its data (model downloads, traces), keeping the cluster and its operators."""
+    profile = Lab.of(ctx).config.minikube_profile
     if not yes:
-        what = "the whole minikube cluster" if cluster else "the lab's releases and all their data"
+        what = f"the whole minikube profile {profile!r}" if cluster else "the lab's releases and all their data"
         typer.confirm(f"Delete {what}?", abort=True)
     if cluster:
-        infra.delete_cluster()
+        infra.delete_cluster(profile)
     else:
         Lab.of(ctx).installer.uninstall()
 
