@@ -2,6 +2,7 @@ from typing import Annotated
 
 import typer
 
+from llm_bonsai import report
 from llm_bonsai.lab import Lab
 from llm_bonsai.setup import infra, preflight, prometheus, teams
 
@@ -13,8 +14,9 @@ app = typer.Typer(
 
 @app.command("preflight")
 def preflight_command() -> None:
-    """Check the host (RAM, Docker VM, disk, tools) and recommend how to create the cluster. Read-only."""
-    preflight.run()
+    """Check the host against the hard requirements (OS, Docker memory and CPUs, disk, tool versions). Read-only."""
+    if not preflight.run():
+        raise typer.Exit(code=1)
 
 
 @app.command("cluster")
@@ -104,4 +106,4 @@ def prometheus_command(ctx: typer.Context) -> None:
     with lab.gateway.admin() as admin:
         scrape_key = prometheus.ensure_scrape_key(admin, lab.env)
     lab.installer.install_prometheus(scrape_key)
-    print("Prometheus is up; `llm-bonsai ui` serves it on http://localhost:9090")
+    report.line(("✓ Prometheus is up; ", "bold green"), "`llm-bonsai ui` serves it on http://localhost:9090")

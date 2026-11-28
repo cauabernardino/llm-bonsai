@@ -12,6 +12,7 @@ from typing import Any
 import httpx
 import openai
 
+from llm_bonsai import report
 from llm_bonsai.catalog import GATEWAY, GATEWAY_POD_LABELS
 from llm_bonsai.clients.kube import Kube
 from llm_bonsai.clients.tunnels import Tunnels
@@ -114,7 +115,7 @@ class Gateway:
                         f"check `kubectl -n {GATEWAY.namespace} get pods`"
                     ) from error
                 if not waiting:
-                    print(f"  (waiting up to {wait_s:.0f}s for the gateway to answer)", flush=True)
+                    report.note(f"  (waiting up to {wait_s:.0f}s for the gateway to answer)")
                     waiting = True
                 if now - last_reconnect > RECONNECT_AFTER_S:
                     tunnel.restart()

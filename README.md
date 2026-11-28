@@ -34,12 +34,25 @@ flowchart LR
 
 ## Quick start
 
-**Tested on** an Apple Silicon Mac with 24 GB of RAM, ~40 GB of free disk and Docker Desktop with **Memory ≥ 17 GB** (Settings → Resources). The cluster takes 14 GB; the rest is for Docker's VM ([memory budget](#memory-budget)). Install the tools, then the CLI from a checkout:
+**Requirements.** `llm-bonsai setup preflight` checks every one of these and exits non-zero if one fails:
+
+| | Needs |
+|---|---|
+| OS and CPU | macOS or Linux, arm64 or amd64 |
+| Docker | running and usable without `sudo`, with **≥ 16.5 GiB of memory** and ≥ 6 CPUs. With Docker Desktop that's Settings → Resources → Memory ≥ 17 GB, and the host keeps whatever the VM doesn't take. |
+| Disk | ≥ 40 GiB free where Docker keeps its data |
+| Tools | `kubectl` ≥ 1.36, `helm` ≥ 3.8, `minikube` ≥ 1.39, plus [`uv`](https://docs.astral.sh/uv/) to install the CLI |
+
+The cluster takes 14 GiB; see the [memory budget](#memory-budget). **Tested end to end on** macOS 26 on Apple Silicon (24 GB, Docker Desktop with Docker Engine 29.9, kubectl 1.37, helm 4.3, minikube 1.39). Preflight's Linux and WSL2 rules are covered by unit tests, but nobody has run the whole lab on Linux yet; reports are welcome.
+
+Install the tools, then the CLI from a checkout:
 
 ```bash
-brew install kubernetes-cli helm minikube uv   # Homebrew's kubectl: Docker Desktop's can be too old
+brew install kubernetes-cli helm minikube uv   # macOS; on Linux use the links below
 uv tool install .                              # puts `llm-bonsai` on your PATH
 ```
+
+On Linux: [Docker Engine](https://docs.docker.com/engine/install/), [kubectl](https://kubernetes.io/docs/tasks/tools/install-kubectl-linux/), [helm](https://helm.sh/docs/intro/install/), [minikube](https://minikube.sigs.k8s.io/docs/start/) and [uv](https://docs.astral.sh/uv/getting-started/installation/). On macOS, use Homebrew's `kubectl`: the one Docker Desktop ships can be too old for the cluster.
 
 Then build and check the lab:
 
@@ -150,7 +163,7 @@ For the same metrics over time, install the optional Prometheus pod with `llm-bo
 
 ## How it's built, phase by phase
 
-The sections below explain what each phase installs, show real output, and list what's worth knowing. Your timings will differ.
+The sections below explain what each phase installs, show results from real runs (abridged, as plain text), and list what’s worth knowing. Your timings will differ.
 
 | Phase | What | Status |
 |---|---|---|
@@ -168,10 +181,10 @@ The sections below explain what each phase installs, show real output, and list 
 
 ### Phase 0: Preflight and local cluster
 
-`setup preflight` reports RAM, CPU model, free disk, the Docker VM's size, installed tools and kube contexts, then recommends how to create the cluster. It's read-only. It also recommends [OrbStack](https://orbstack.dev/) if it finds it installed, a lighter alternative to Docker Desktop + minikube. `setup cluster` starts minikube on the Docker driver with 6 CPUs and 14 GB, plus metrics-server for `kubectl top`.
+`setup preflight` is read-only. It checks the host against the requirements above (OS, architecture, Docker's memory and CPUs, free disk where Docker stores data, tool versions) and prints a fix for each failure: Docker Desktop settings on macOS, `systemctl` and the `docker` group on Linux. It also reports the CPU, whether it has the bf16 instructions vLLM on CPU wants, and the current kube context. If [OrbStack](https://orbstack.dev/) is installed, it mentions that as a lighter alternative to Docker Desktop + minikube. `setup cluster` starts minikube on the Docker driver with Kubernetes 1.37 (pinned), 6 CPUs, 14 GB and 40 GB of disk, plus metrics-server for `kubectl top`.
 
-- **The node lies about its size.** It reports the Docker VM's CPUs and memory as its capacity, not minikube's real 6 CPU / 14 GiB cgroup. The scheduler overcommits without warning. Past 14 GiB, processes are OOM-killed inside the node instead of pods being evicted cleanly. Honest requests and limits, and watching `kubectl top`, are the only defence.
-- **The CPU model matters later:** vLLM on CPU wants `bfloat16`, which M2 and newer support and M1 doesn't.
+- **The node lies about its size.** It reports everything Docker has (the VM's CPUs and memory on Docker Desktop, the host's on Linux) as its capacity, not minikube's real 6 CPU / 14 GiB cgroup. The scheduler overcommits without warning. Past 14 GiB, processes are OOM-killed inside the node instead of pods being evicted cleanly. Honest requests and limits, and watching `kubectl top`, are the only defence.
+- **The CPU model matters later:** vLLM on CPU wants `bfloat16`. Apple M2 and newer have it, M1 doesn't; on x86 it takes AVX-512 BF16 or AMX.
 
 ### Phase 1: Local model with Ollama
 

@@ -16,6 +16,7 @@ import openai
 from langfuse import Evaluation
 from langfuse.api import NotFoundError
 from langfuse.experiment import ExperimentItemResult
+from rich.text import Text
 
 from llm_bonsai import report
 from llm_bonsai.assistant import PROMPT_NAME, SupportAssistant, Variant, ensure_prompt
@@ -69,8 +70,8 @@ def keyword_check(*, input: Any, output: Any, expected_output: Any, metadata: An
     return Evaluation(name="keyword", value=1.0 if hit else 0.0, comment=f"looked for: {' / '.join(options)}")
 
 
-# Tried on known good/bad answers: with "1 (wrong) to 5" first, chat-small replies 1 to everything; with
-# this rubric it replies 5 to everything. Either way the score follows the prompt, not the answer.
+# A 0.5B judge follows the rubric's wording, not the answer: with "1 (wrong) to 5" first it scored
+# everything 1, with this rubric everything 5. The probe reports that instead of trusting the number.
 JUDGE_PROMPT = """QUESTION: {question}
 REFERENCE ANSWER: {reference}
 CANDIDATE ANSWER: {answer}
@@ -162,9 +163,8 @@ def plural(n: int, noun: str) -> str:
     return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
 
 
-def shorten(text: str, width: int) -> str:
-    text = " ".join(text.split())
-    return text if len(text) <= width else text[: width - 1] + "…"
+def one_line(text: str) -> str:
+    return " ".join(text.split())
 
 
 def takeaways(rows: list[Row], total: int, judge: bool) -> list[str]:
@@ -233,15 +233,19 @@ def run(lab: Lab, variant: Variant, judge: bool) -> None:
         f"the {len(dataset.items)} questions of dataset {DATASET}, with prompt {PROMPT_NAME} v{prompt.version} "
         f"(label {variant})",
     )
-    print(f"Experiment run {run_name!r}: one item at a time (~5 s each{' with the judge' if judge else ''})")
+    report.line(
+        ("Experiment run ", "bold"),
+        repr(run_name),
+        (f": one item at a time (~5 s each{' with the judge' if judge else ''})", "dim"),
+    )
 
     def task(*, item: Any, **kwargs: Any) -> str:
         question: str = item.input["question"]
-        print(f"  · {question}", flush=True)
+        report.note(f"  · {question}")
         return assistant.answer(question).text
 
     # One at a time: the task is synchronous, so the SDK's event loop runs items serially anyway,
-    # and Ollama on CPU gains little from parallel requests (see `probe load`).
+    # and a CPU-bound model server gains little from parallel requests.
     result = dataset.run_experiment(
         name=f"{DATASET} eval",
         run_name=run_name,
@@ -255,18 +259,23 @@ def run(lab: Lab, variant: Variant, judge: bool) -> None:
     )
 
     rows = sorted((row(item_result) for item_result in result.item_results), key=lambda r: r.id)
-    print("\n #  keyword  judge  question → answer")
+    scored = report.table(report.right("#"), "keyword", "judge", report.clipped("question"), report.clipped("answer"))
     for n, r in enumerate(rows, start=1):
         rating = str(r.rating) if r.rating is not None else ("?" if judge else "–")
-        keyword = "pass" if r.keyword else "miss"
-        print(f" {n}  {keyword:<7}  {rating:<5}  {shorten(r.question, 40)} → {shorten(r.answer, 70)}")
+        keyword = Text("pass", style="green") if r.keyword else Text("miss", style="red")
+        scored.add_row(str(n), keyword, rating, one_line(r.question), one_line(r.answer))
+    report.show(scored)
     unparsed = Counter(r.judge_reply for r in rows if judge and r.rating is None)
     if unparsed:
         replies = ", ".join(f"{reply!r} ×{n}" if n > 1 else repr(reply) for reply, n in unparsed.most_common())
-        print(f"Judge replies that didn't parse (shown as ?): {replies}")
-    print(f"\nUI (`llm-bonsai ui` first): {experiments_url(experiment_id)}")
+        report.line(("Judge replies that didn't parse (shown as ?): ", "yellow"), replies)
+    report.console.print()
+    report.line(("UI ", "bold"), ("(`llm-bonsai ui` first): ", "dim"), experiments_url(experiment_id))
     if previous:
-        print(f"Side by side with the latest {other_variant(variant)} run: {experiments_url(previous, experiment_id)}")
+        report.line(
+            (f"Side by side with the latest {other_variant(variant)} run: ", "bold"),
+            experiments_url(previous, experiment_id),
+        )
 
     report.summary(
         *takeaways(rows, len(dataset.items), judge),

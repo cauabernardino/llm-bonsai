@@ -13,6 +13,7 @@ from typing import Any
 import openai
 from openai.types.chat import ChatCompletionMessageParam
 
+from llm_bonsai import report
 from llm_bonsai.catalog import CHAT_BROKEN, CHAT_SMALL, EMBED, SUPPORT_BOT
 from llm_bonsai.clients.langfuse import run_id
 from llm_bonsai.lab import Lab
@@ -33,9 +34,9 @@ def check(name: str, probe: Callable[[], str]) -> bool:
     try:
         detail = probe()
     except Exception as error:  # report every failure, then keep going
-        print(f"FAIL  {name}: {type(error).__name__}: {error}")
+        report.line(report.passed(False), f"  {name}: ", (f"{type(error).__name__}: {error}", "red"))
         return False
-    print(f"PASS  {name} ({time.perf_counter() - start:.1f}s): {detail}")
+    report.line(report.passed(True), f"  {name} ", (f"({time.perf_counter() - start:.1f}s)", "dim"), f": {detail}")
     return True
 
 
@@ -115,6 +116,9 @@ def run(lab: Lab) -> bool:
         check("traced in Langfuse", traced),
         check("failed call traced in Langfuse", failure_traced),
     ]
+    report.console.print()
     if all(results):
-        print("all smoke checks passed")
+        report.line(("all smoke checks passed", "bold green"))
+    else:
+        report.line((f"{results.count(False)} of {len(results)} smoke checks failed", "bold red"))
     return all(results)

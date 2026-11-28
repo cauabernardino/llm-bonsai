@@ -106,18 +106,22 @@ def run(lab: Lab, variant: Variant, question: str) -> None:
     report.header(f"{SUPPORT_BOT.alias} (long-lived key from `llm-bonsai setup teams`)", repr(question))
     assistant = SupportAssistant(sdk, lab.gateway.client(lab.env.get(SUPPORT_BOT.env_var), timeout_s=60), prompt)
     user_id = run_id("app")
-    with propagate_attributes(user_id=user_id, tags=["probe-app"]):
+    with report.console.status("asking the assistant…"), propagate_attributes(user_id=user_id, tags=["probe-app"]):
         answer = assistant.answer(question)
     sdk.flush()
 
-    print(f"Retrieved: {', '.join(s.id for s in answer.snippets) or 'nothing'}")
-    print(f"Prompt:    {PROMPT_NAME} v{prompt.version} (label {variant})")
-    print(f"Answer:    {answer.text}")
+    report.pairs(
+        ("Retrieved", ", ".join(s.id for s in answer.snippets) or "nothing"),
+        ("Prompt", f"{PROMPT_NAME} v{prompt.version} (label {variant})"),
+        ("Answer", answer.text),
+    )
 
-    print(f"\nLangfuse trace {answer.trace_id} (waiting for the gateway's part to arrive):")
-    observations = lab.langfuse.wait_for_trace(answer.trace_id, lambda found: shape(found).gateway is not None)
-    print("\n".join(tree(observations)))
-    print(f"  UI: `llm-bonsai ui`, then {trace_url(answer.trace_id)}")
+    with report.console.status("waiting for the gateway's part of the trace to reach Langfuse…"):
+        observations = lab.langfuse.wait_for_trace(answer.trace_id, lambda found: shape(found).gateway is not None)
+    report.section(f"Langfuse trace {answer.trace_id}")
+    for tree_line in tree(observations):
+        report.console.print(tree_line)
+    report.note(f"UI: `llm-bonsai ui`, then {trace_url(answer.trace_id)}")
 
     report.summary(
         *takeaways(shape(observations)),

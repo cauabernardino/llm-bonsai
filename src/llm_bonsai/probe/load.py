@@ -129,21 +129,22 @@ def measure(concurrency: int, results: list[Attempt]) -> Level:
 
 
 def seconds(value: float | None) -> str:
-    return f"{value:7.2f}s" if value is not None else f"{'–':>8}"
+    return f"{value:.2f}s" if value is not None else "–"
 
 
-HEADER = f"{'conc':>4} {'reqs':>5} {'req/s':>6} {'p50 lat':>8} {'p95 lat':>8} {'p50 ttft':>8} {'p95 ttft':>8}  errors"
+COLUMNS = ["conc", "reqs", "req/s", "p50 lat", "p95 lat", "p50 ttft", "p95 ttft"]
 
 
-def row(level: Level) -> str:
+def row(level: Level) -> list[str]:
+    """The level's cells, in COLUMNS order, then the errors."""
     errors = "0"
     if level.errors:
         kinds = ", ".join(f"{kind} ×{count}" for kind, count in level.errors.most_common())
         errors = f"{level.errors.total()} ({kinds})"
-    return (
-        f"{level.concurrency:>4} {level.attempts:>5} {level.rps:>6.2f} {seconds(level.p50)} {seconds(level.p95)} "
-        f"{seconds(level.ttft50)} {seconds(level.ttft95)}  {errors}"
-    )
+    return [
+        str(level.concurrency), str(level.attempts), f"{level.rps:.2f}", seconds(level.p50), seconds(level.p95),
+        seconds(level.ttft50), seconds(level.ttft95), errors,
+    ]  # fmt: skip
 
 
 LEGEND = "lat = time to the full answer, ttft = time to first token; p50 = median, p95 = 95th percentile"
@@ -170,7 +171,8 @@ def takeaways(levels: list[Level], model: str) -> list[str]:
             if two.rps < 1.8 * one.rps
             else f"throughput went {one.rps:.2f} → {two.rps:.2f} req/s"
         )
-        bullets.append(f"{ttft} Each request got slower (p50 {one.p50:.1f}s → {two.p50:.1f}s) and {scaling}.")
+        pace = "got slower" if two.p50 > 1.1 * one.p50 else "took about as long"
+        bullets.append(f"{ttft} Each request {pace} (p50 {one.p50:.1f}s → {two.p50:.1f}s) and {scaling}.")
     base = by_concurrency.get(2, levels[0])
     top = levels[-1]
     if top.concurrency > base.concurrency:
@@ -199,23 +201,24 @@ def run(lab: Lab, levels: list[int], duration: float, model: str, max_tokens: in
         f"{SUPPORT_BOT.alias} (long-lived key from `llm-bonsai setup teams`)",
         f"{PROMPT!r} (every request, streamed, max_tokens={max_tokens})",
     )
-    print(f"{model}, {duration:.0f}s per concurrency level")
-    print(f"{LEGEND}\n")
-    print(HEADER)
+    results_table = report.table(
+        *map(report.right, COLUMNS), "errors", title=f"{model}, {duration:.0f}s per concurrency level", caption=LEGEND
+    )
     measured = []
-    for concurrency in levels:
-        results = asyncio.run(generator.run(concurrency, duration))
-        measured.append(measure(concurrency, results))
-        print(row(measured[-1]), flush=True)
+    with report.live(results_table):
+        for concurrency in levels:
+            results = asyncio.run(generator.run(concurrency, duration))
+            measured.append(measure(concurrency, results))
+            results_table.add_row(*row(measured[-1]))
 
     if any(level.ok == 0 for level in measured):
-        print(
-            "\nSome levels had no successful requests; see the errors column "
-            "(HTTP 401/403: the key can't use this model; ConnectError: the gateway went away)."
+        report.line(
+            ("Some levels had no successful requests; see the errors column ", "yellow"),
+            "(HTTP 401/403: the key can't use this model; ConnectError: the gateway went away).",
         )
         return
     if any(level.ok < 20 for level in measured):
-        print("\n(p95 over fewer than 20 requests is close to the slowest one; use --duration for more.)")
+        report.note("p95 over fewer than 20 requests is close to the slowest one; use --duration for more.")
     report.summary(
         *takeaways(measured, model),
         not_shown="how CPU-based autoscaling misreads this. Once the server is saturated, its CPU looks "

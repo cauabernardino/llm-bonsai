@@ -10,6 +10,7 @@ import time
 from collections.abc import Mapping
 
 import httpx
+from rich.text import Text
 
 from llm_bonsai import report
 from llm_bonsai.catalog import CHAT_BROKEN, CHAT_SMALL, PAYMENTS_AI
@@ -33,22 +34,28 @@ def describe_failure(status_message: str) -> str:
 
 def show_langfuse(langfuse: Langfuse, user_id: str) -> list[Observation]:
     """Print the run's attempts as Langfuse recorded them; returns them (empty if Langfuse had none)."""
-    print(f"\nLangfuse, user {user_id}:")
     try:
-        generations = sorted(langfuse.wait_for_generations(user_id, at_least=2), key=lambda g: g.start_time)
+        with report.console.status("waiting for Langfuse to ingest both attempts…"):
+            generations = sorted(langfuse.wait_for_generations(user_id, at_least=2), key=lambda g: g.start_time)
     except (TimeoutError, httpx.HTTPError) as error:
-        print(f"  not available ({error})")
+        report.section(f"Langfuse, user {user_id}")
+        report.note(f"not available ({error})")
         return []
     first = generations[0].start_time
-    print(f"  {'start':>7} {'took':>8}  outcome")
+    attempts = report.table(
+        report.right("start"), report.right("took"), "outcome", "backend", title=f"Langfuse, user {user_id}"
+    )
     for generation in generations:
         offset_ms = (generation.start_time - first).total_seconds() * 1000
-        if generation.level == "ERROR":
-            outcome = f"ERROR  {describe_failure(generation.status_message)}"
-        else:
-            outcome = f"ok     {generation.model}"
-        print(f"  {f'+{offset_ms:.0f}ms':>7} {generation.latency * 1000:6.0f}ms  {outcome}")
-    print(f"  UI: `llm-bonsai ui`, then http://localhost:3000 → Tracing → filter User ID = {user_id}")
+        failed = generation.level == "ERROR"
+        attempts.add_row(
+            f"+{offset_ms:.0f} ms",
+            f"{generation.latency * 1000:.0f} ms",
+            Text("ERROR", style="red") if failed else Text("ok", style="green"),
+            describe_failure(generation.status_message) if failed else generation.model,
+        )
+    report.show(attempts)
+    report.note(f"UI: `llm-bonsai ui`, then http://localhost:3000 → Tracing → filter User ID = {user_id}")
     return generations
 
 
@@ -88,11 +95,12 @@ def run(lab: Lab) -> None:
         )
         elapsed = time.perf_counter() - start
 
-    print(f"Requested model chat-broken → HTTP {raw.http_response.status_code} in {elapsed:.2f}s")
-    print("Response headers:")
+    report.line("Requested model chat-broken → ", report.http(raw.http_response.status_code), f" in {elapsed:.2f}s")
+    headers = report.table("response header", "value")
     for name in FALLBACK_HEADERS:
-        print(f"  {name}: {raw.headers.get(name)}")
-    print(f"Answer: {(raw.parse().choices[0].message.content or '').strip()}")
+        headers.add_row(name, str(raw.headers.get(name)))
+    report.console.print(headers)
+    report.line(("Answer: ", "bold"), (raw.parse().choices[0].message.content or "").strip())
 
     generations = show_langfuse(lab.langfuse, user_id)
     report.summary(*takeaways(raw.headers, generations))

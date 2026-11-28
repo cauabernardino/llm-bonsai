@@ -1,5 +1,5 @@
 # LiteLLM's database: virtual keys, teams, budgets and spend logs.
-# Credentials come from the `litellm-db` Secret (created by `make secrets`).
+# Credentials come from the `litellm-db` Secret (created by `llm-bonsai setup secrets`).
 apiVersion: v1
 kind: Service
 metadata:

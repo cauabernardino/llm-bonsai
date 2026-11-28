@@ -1,14 +1,31 @@
 [project]
 name = "llm-bonsai"
 version = "0.1.0"
-description = "A tiny local GenAI platform lab: LiteLLM + Langfuse + Ollama on Kubernetes"
+description = "A real GenAI platform, deliberately kept tiny: an LLM gateway, local models, tracing, evals and metrics on a small Kubernetes cluster, built and probed by one CLI."
 readme = "README.md"
+authors = [{ name = "Cauã Bernardino" }]
 requires-python = ">=3.12"
+keywords = ["llm", "genai", "llm-gateway", "litellm", "langfuse", "ollama", "kubernetes", "observability", "home-lab"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Education",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: System :: Systems Administration",
+    "Typing :: Typed",
+]
 dependencies = [
     "httpx>=0.29.0",
     "langfuse>=5.2,<6",
     "openai>=3.60.0",
     "python-dotenv>=1.2.4",
+    "rich>=15.0.0",
     "typer>=0.29.3",
 ]
 

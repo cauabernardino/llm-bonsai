@@ -4,7 +4,7 @@
 fullnameOverride: litellm
 
 # One pod running the full proxy (gateway + management API + UI). The chart's default
-# split into gateway/backend/ui at 4Gi each doesn't fit the laptop budget.
+# split into gateway/backend/ui at 4Gi each doesn't fit a small machine.
 monolith:
   enabled: true
 
@@ -26,7 +26,7 @@ database:
 
 # Shared state across replicas: the chart emits REDIS_HOST/REDIS_PORT, which the proxy uses
 # for cross-pod rate limits and spend counters. Without it each pod counts on its own
-# (scripts/demo_replicas.py shows the difference).
+# (`llm-bonsai probe replicas` shows the difference).
 redis:
   host: valkey.llm.svc.cluster.local
   port: 6379
@@ -42,7 +42,7 @@ migrationJob:
 # In monolith mode every gateway.* value configures the monolith pod.
 gateway:
   numWorkers: 1
-  # LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY for the langfuse_otel callback (made by `make secrets`).
+  # LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY for the langfuse_otel callback (made by `llm-bonsai setup secrets`).
   envSecrets:
     - litellm-langfuse
   extraEnv:
@@ -51,7 +51,7 @@ gateway:
   replicaCount: 1
   hpa:
     enabled: false
-  # Measured on v1.111.0: ~1.2Gi steady, 1.8Gi peak while starting up (1.5Gi got OOMKilled).
+  # v1.111.0 needs ~1.2Gi steady and ~1.8Gi while starting up.
   resources:
     requests:
       cpu: 500m

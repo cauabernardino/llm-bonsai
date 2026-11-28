@@ -1,4 +1,4 @@
-# Chart otwld/ollama 1.96.0 (Ollama 0.40.17). Runs on CPU: Metal isn't visible inside the Linux VM.
+# Chart otwld/ollama 1.96.0 (Ollama 0.40.17). Runs on CPU: the cluster has no GPU.
 ollama:
   models:
     # Pulled by a postStart hook; the pod only turns Ready once both are on disk.

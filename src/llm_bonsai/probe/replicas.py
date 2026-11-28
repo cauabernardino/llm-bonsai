@@ -15,6 +15,8 @@ import uuid
 from collections import Counter
 from dataclasses import dataclass
 
+from rich.text import Text
+
 from llm_bonsai import report
 from llm_bonsai.catalog import CHAT_SMALL, GATEWAY, PAYMENTS_AI
 from llm_bonsai.errors import LabError
@@ -54,16 +56,17 @@ def wait_for_old_pods_gone(lab: Lab, timeout_s: float = 120) -> None:
 
 
 def deploy(lab: Lab, description: str, set_values: list[str]) -> None:
-    print(f"  redeploying the gateway: {description} (helm upgrade, ~1 min)…", flush=True)
-    lab.installer.install_litellm(set_values, quiet=True)
-    wait_for_old_pods_gone(lab)
-    # The CLI's own port-forward was pinned to a pod that is now gone; reconnect to a live one.
-    lab.gateway.reconnect()
-    lab.gateway.require(wait_s=90)
+    with report.console.status(f"redeploying the gateway: {description} (helm upgrade, ~1 min)…"):
+        lab.installer.install_litellm(set_values, quiet=True)
+        wait_for_old_pods_gone(lab)
+        # The CLI's own port-forward was pinned to a pod that is now gone; reconnect to a live one.
+        lab.gateway.reconnect()
+        lab.gateway.require(wait_s=90)
+    report.note(f"  redeployed the gateway: {description}")
     deployment = lab.kube.kubectl_json("get", "deploy", GATEWAY.name, namespace=GATEWAY.namespace)
     env = deployment["spec"]["template"]["spec"]["containers"][0].get("env", [])
     redis = next((e["value"] for e in env if e["name"] == "REDIS_HOST"), None)
-    print(f"  gateway: {deployment['status']['readyReplicas']} ready replica(s), REDIS_HOST={redis or 'unset'}")
+    report.note(f"  gateway: {deployment['status']['readyReplicas']} ready replica(s), REDIS_HOST={redis or 'unset'}")
 
 
 def burst_from_inside(lab: Lab, key: str) -> list[str]:
@@ -106,7 +109,7 @@ def per_pod_split(lab: Lab, since_s: int) -> dict[str, Counter[str]]:
 
 
 def scenario(lab: Lab, title: str, description: str, set_values: list[str]) -> Outcome:
-    print(title)
+    report.section(title)
     deploy(lab, description, set_values)
     limits = {"models": [CHAT_SMALL], "rpm_limit": RPM_LIMIT}
     with lab.gateway.temporary_key("probe-replicas", team=PAYMENTS_AI.alias, **limits) as key:
@@ -114,10 +117,12 @@ def scenario(lab: Lab, title: str, description: str, set_values: list[str]) -> O
         codes = burst_from_inside(lab, key)
         split = per_pod_split(lab, int(time.monotonic() - start) + 5)
     allowed = codes.count("200")
-    print(f"  {BURST} requests through the Service → {allowed} × HTTP 200, {codes.count('429')} × HTTP 429")
+    pods = report.table("pod", report.right("HTTP 200"), report.right("HTTP 429"))
     for pod, counts in split.items():
-        print(f"    {pod}: {counts['200']} × HTTP 200, {counts['429']} × HTTP 429")
-    print()
+        pods.add_row(pod, str(counts["200"]), str(counts["429"]))
+    pods.add_section()
+    pods.add_row(Text(f"{BURST} requests through the Service", style="bold"), str(allowed), str(codes.count("429")))
+    report.console.print(pods)
     return Outcome(allowed, " + ".join(str(counts["200"]) for counts in split.values()))
 
 
@@ -164,9 +169,9 @@ def run(lab: Lab, keep_replicas: bool) -> None:
         )
     finally:
         if keep_replicas:
-            print("Leaving 2 replicas running (--keep-replicas).")
+            report.note("Leaving 2 replicas running (--keep-replicas).")
         else:
-            print("Restoring the normal gateway")
+            report.section("Restoring the normal gateway")
             deploy(lab, "1 replica, Valkey on", [])
 
     report.summary(

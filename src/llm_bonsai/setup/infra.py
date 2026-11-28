@@ -8,6 +8,7 @@ from collections.abc import Callable, Iterable
 from functools import partial
 from typing import Any
 
+from llm_bonsai import report
 from llm_bonsai.catalog import LLM_NAMESPACE, OBSERVABILITY_NAMESPACE
 from llm_bonsai.clients.kube import Kube
 from llm_bonsai.clients.shell import run
@@ -64,6 +65,8 @@ LANGFUSE = Chart(
 CLUSTER_CPUS = 6
 CLUSTER_MEMORY_GIB = 14
 CLUSTER_DISK_GB = 40
+# Pinned so the cluster doesn't change with the minikube version, and kubectl's version floor follows it.
+KUBERNETES_VERSION = "v1.37.0"
 
 # Where minikube's storage-provisioner keeps each volume: <root><namespace>/<claim name>.
 HOSTPATH_ROOT = "/tmp/hostpath-provisioner/"  # noqa: S108 (a path on the node, not a local temp file)
@@ -90,9 +93,8 @@ def orphaned_volumes(volumes: Iterable[dict[str, Any]]) -> tuple[list[str], list
 
 
 def create_cluster() -> None:
-    # Docker Desktop's VM needs >= 17 GB: minikube's 14 GiB plus headroom for the VM itself.
     run(
-        "minikube", "start", "--driver=docker", f"--cpus={CLUSTER_CPUS}",
+        "minikube", "start", "--driver=docker", f"--kubernetes-version={KUBERNETES_VERSION}", f"--cpus={CLUSTER_CPUS}",
         f"--memory={CLUSTER_MEMORY_GIB}g", f"--disk-size={CLUSTER_DISK_GB}g",
         capture=False,
     )  # fmt: skip
@@ -113,7 +115,9 @@ class Installer:
 
     def install_secrets(self) -> None:
         added = self._env.fill_missing(credentials.GENERATORS)
-        print(f"{self._env.path}: added {', '.join(added) if added else 'nothing (all present)'}")
+        report.line(
+            (f"{self._env.path}: ", "bold"), f"added {', '.join(added)}" if added else "nothing to add (all present)"
+        )
         self._kube.apply_objects(credentials.kubernetes_secrets(self._env))
 
     def install_ollama(self) -> None:
@@ -171,9 +175,12 @@ class Installer:
             ("litellm", self.install_litellm),
         ]
         for number, (name, step) in enumerate(steps, start=1):
-            print(f"\n▶ [{number}/{len(steps)}] {name}", flush=True)
+            report.step(number, len(steps), name)
             step()
-        print("\nNext: `llm-bonsai setup teams`, then `llm-bonsai probe smoke`.")
+        report.console.print()
+        report.line(
+            ("✓ lab installed. ", "bold green"), "Next: `llm-bonsai setup teams`, then `llm-bonsai probe smoke`."
+        )
 
     def uninstall(self) -> None:
         """Remove the lab's releases and data, keeping the cluster and its cluster-wide
@@ -193,9 +200,9 @@ class Installer:
         ]
         for step in steps:
             try:
-                print(step(), end="", flush=True)
+                report.console.print(step(), end="", soft_wrap=True)
             except LabError as error:
-                print(f"skipped: {error}")
+                report.note(f"skipped: {error}")
 
     def delete_orphaned_volumes(self) -> str:
         """Delete what the provisioner may have left behind (see `orphaned_volumes`)."""

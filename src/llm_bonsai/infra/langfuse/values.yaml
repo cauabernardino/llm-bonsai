@@ -1,5 +1,5 @@
 # Chart langfuse/langfuse 2.3.0 (Langfuse 4.83.0), from https://langfuse.github.io/langfuse-k8s.
-# Every credential comes from the single `langfuse` Secret that `make secrets` builds from .env,
+# Every credential comes from the single `langfuse` Secret that `llm-bonsai setup secrets` builds from .env,
 # following the chart's examples/minimal-installation. Chart-generated passwords would not
 # survive a reinstall against retained volumes.
 
@@ -65,7 +65,7 @@ postgresql:
     tag: "18.7"
   storage:
     requestedSize: 2Gi
-    # The chart default (Retain) would keep stale data around after `make down`.
+    # The chart default (Retain) would keep stale data around after `llm-bonsai teardown`.
     persistentVolumeClaimRetentionPolicy:
       whenDeleted: Delete
       whenScaled: Retain

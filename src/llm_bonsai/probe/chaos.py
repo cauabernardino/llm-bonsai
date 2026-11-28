@@ -9,6 +9,8 @@ import asyncio
 import time
 from dataclasses import dataclass
 
+from rich.text import Text
+
 from llm_bonsai import report
 from llm_bonsai.catalog import GATEWAY, SUPPORT_BOT
 from llm_bonsai.clients.gateway import Gateway
@@ -68,23 +70,31 @@ async def kill_during_load(lab: Lab) -> ChaosRun:
     pod = pods[0].name
     killed_at = time.perf_counter() - t0
     await asyncio.to_thread(lab.kube.kubectl, "delete", "pod", pod, "--wait=false", namespace=GATEWAY.namespace)
-    print(f"t={killed_at:5.1f}s  deleted pod {pod}", flush=True)
+    report.line((f"t={killed_at:5.1f}s  ", "dim"), ("deleted pod ", "red"), pod)
     ready_at = await wait_for_replacement(lab.gateway, pod, t0)
-    print(f"t={ready_at:5.1f}s  replacement pod Ready", flush=True)
+    report.line((f"t={ready_at:5.1f}s  ", "dim"), ("replacement pod Ready", "green"))
     return ChaosRun(await traffic, len(pods), killed_at, ready_at)
 
 
 def timeline(results: list[Attempt]) -> None:
-    print(f"\nRequests by start time ({BUCKET_S}s buckets):")
+    buckets = report.table(
+        report.right("started"),
+        report.right("ok"),
+        report.right("failed"),
+        "",
+        title=f"Requests by start time ({BUCKET_S}s buckets)",
+    )
     last = max(r.started for r in results)
     for start in range(0, int(last) + 1, BUCKET_S):
         bucket = [r for r in results if start <= r.started < start + BUCKET_S]
+        span = f"{start}–{start + BUCKET_S} s"
         if not bucket:
-            print(f"  {start:>3}–{start + BUCKET_S:<3}s  none started ({IDLE_BUCKET})")
+            buckets.add_row(span, "", "", Text(f"none started ({IDLE_BUCKET})", style="dim"))
             continue
         ok = sum(r.error is None for r in bucket)
-        failed = f", {len(bucket) - ok} failed" if len(bucket) > ok else ""
-        print(f"  {start:>3}–{start + BUCKET_S:<3}s  {ok} ok{failed}")
+        failed = len(bucket) - ok
+        buckets.add_row(span, str(ok), Text(str(failed), style="red") if failed else "", "")
+    report.show(buckets)
 
 
 NOT_SHOWN = (
@@ -101,7 +111,7 @@ def run(lab: Lab) -> None:
         f"{SUPPORT_BOT.alias} (long-lived key from `llm-bonsai setup teams`)",
         f"{load.PROMPT!r} ({CONCURRENCY} concurrent streams for {DURATION_S}s, max_tokens=32)",
     )
-    print(f"A gateway pod gets deleted at t={KILL_AT_S}s.\n")
+    report.note(f"A gateway pod gets deleted at t={KILL_AT_S}s, under load.")
     measured = asyncio.run(kill_during_load(lab))
     timeline(measured.attempts)
     damage = assess(measured.attempts, measured.killed_at)
@@ -112,9 +122,10 @@ def run(lab: Lab) -> None:
             "Run with a single replica to see the outage."
         )
         return
-    print(
-        f"\nFailed attempts: {damage.failed} ({', '.join(damage.error_kinds)}). "
-        f"Workers retry every {load.ERROR_BACKOFF_S}s, so this counts retries, not users."
+    report.line(
+        (f"Failed attempts: {damage.failed}", "bold red"),
+        f" ({', '.join(damage.error_kinds)}). ",
+        (f"Workers retry every {load.ERROR_BACKOFF_S}s, so this counts retries, not users.", "dim"),
     )
     if damage.recovered_at is None:
         report.summary(
@@ -132,7 +143,7 @@ def run(lab: Lab) -> None:
         breakdown = "nearly all of it waiting for the replacement pod; the port-forward picked it up right away"
     else:
         breakdown = f"{startup:.0f}s waiting for the replacement pod + {reattach:.0f}s for the port-forward to reattach"
-    print(f"Outage: {outage:.1f}s, {breakdown} (timings ±1s)")
+    report.line((f"Outage: {outage:.1f}s", "bold"), f", {breakdown} ", ("(timings ±1s)", "dim"))
 
     replicas = "one replica" if measured.pods_before == 1 else f"{measured.pods_before} replicas"
     cut_off = "1 request was" if damage.cut_off == 1 else f"{damage.cut_off} requests were"

@@ -4,6 +4,7 @@ from collections import Counter
 from datetime import UTC, datetime
 from typing import Any
 
+from llm_bonsai.catalog import CHAT_SMALL
 from llm_bonsai.models import Attempt, Observation
 from llm_bonsai.probe import app, cache, chaos, evaluation, fallback, limits, load, replicas
 from llm_bonsai.probe.load import Level
@@ -226,3 +227,10 @@ def test_eval_without_the_judge_or_any_parsed_rating() -> None:
     assert len(evaluation.takeaways([eval_row(True, None)], total=1, judge=False)) == 1
     bullets = evaluation.takeaways([eval_row(True, None)], total=1, judge=True)
     assert "no judge score" in bullets[1] and len(bullets) == 2
+
+
+def test_load_says_requests_slowed_down_only_when_they_did() -> None:
+    same = load.takeaways([level(1, 0.2, 4.9, 0.3), level(2, 0.4, 4.9, 0.1)], CHAT_SMALL)
+    assert "took about as long (p50 4.9s → 4.9s)" in same[0]
+    slower = load.takeaways([level(1, 0.33, 3.0, 0.1), level(2, 0.47, 4.3, 0.2)], CHAT_SMALL)
+    assert "got slower (p50 3.0s → 4.3s)" in slower[0]

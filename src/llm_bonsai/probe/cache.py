@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import openai
+from rich.text import Text
 
 from llm_bonsai import report
 from llm_bonsai.catalog import CHAT_SMALL, SUPPORT_BOT
@@ -91,21 +92,27 @@ def run(lab: Lab) -> None:
     prompt = f"Write a haiku about a bonsai tree. (run {uuid.uuid4().hex[:6]})"
     report.header(
         "support-bot (long-lived key from `llm-bonsai setup teams`)",
-        f"{prompt!r}\n        the random run id makes request #1 a guaranteed cache miss",
+        f"{prompt!r} (the random run id makes request #1 a guaranteed cache miss)",
     )
 
-    replies = [send(client, prompt, request) for request in REQUESTS]
-    print(f" #  {'request':<26} {'took':>9}  cache  cost")
+    with report.console.status("sending 4 requests…"):
+        replies = [send(client, prompt, request) for request in REQUESTS]
+    requests = report.table(report.right("#"), "request", report.right("took"), "cache", report.right("cost"))
     for n, (request, reply) in enumerate(zip(REQUESTS, replies, strict=True), start=1):
-        cache = ("HIT " if reply.hit else "miss") if request.use_cache else "off "
-        print(f" {n}  {request.label:<26} {reply.elapsed * 1000:6.0f} ms  {cache}   ${reply.cost:.4f}")
+        if not request.use_cache:
+            cache = Text("off", style="dim")
+        else:
+            cache = Text("HIT", style="bold green") if reply.hit else Text("miss", style="yellow")
+        requests.add_row(str(n), request.label, f"{reply.elapsed * 1000:.0f} ms", cache, f"${reply.cost:.4f}")
+    report.console.print(requests)
 
     first, repeat, changed, skipped = replies
-    print(f"\nAnswer #1 (model): {first.answer}")
     source = "cache" if repeat.hit else "model"
-    marker = "← identical to #1" if repeat.answer == first.answer else "← differs from #1"
-    print(f"Answer #2 ({source}): {repeat.answer}  {marker}")
-    print(f"Answer #4 (model): {skipped.answer}")
+    marker = ("identical to #1", "green") if repeat.answer == first.answer else ("differs from #1", "yellow")
+    report.line(("Answer #1 (model): ", "bold"), first.answer)
+    report.line((f"Answer #2 ({source}): ", "bold"), repeat.answer, "  ← ", marker)
+    report.line((f"Answer #3 ({'cache' if changed.hit else 'model'}): ", "bold"), changed.answer)
+    report.line(("Answer #4 (model): ", "bold"), skipped.answer)
 
     report.summary(
         *takeaways(first, repeat, changed, skipped),

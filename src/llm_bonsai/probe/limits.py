@@ -63,12 +63,13 @@ def seconds_until_reset(message: str, now: datetime) -> float:
 
 
 def wait_for_window(seconds: float) -> None:
-    print(f"\n… waiting {seconds:.0f}s for the rate-limit window to reset\n")
-    time.sleep(seconds)
+    with report.console.status(f"waiting {seconds:.0f}s for the rate-limit window to reset…"):
+        time.sleep(seconds)
+    report.note(f"waited {seconds:.0f}s for the rate-limit window to reset")
 
 
 def rate_limit_part(client: openai.OpenAI) -> RateLimitResult:
-    print(f"Part 1: rate limit, {QUICK_REQUESTS} requests in a row")
+    report.section(f"Part 1: rate limit, {QUICK_REQUESTS} requests in a row")
     allowed, retry_after, reset_in, spent = 0, None, DEFAULT_WINDOW_S, 0.0
     limited = False
     for n in range(1, QUICK_REQUESTS + 1):
@@ -81,20 +82,24 @@ def rate_limit_part(client: openai.OpenAI) -> RateLimitResult:
                 limited = True
                 retry_after = error.response.headers.get("retry-after")
                 reset_in = seconds_until_reset(str(error), datetime.now(UTC))
-                print(f"  #{n:<2} HTTP 429  retry-after: {retry_after}  (window resets in {reset_in:.0f}s)")
+                report.line(
+                    f"  #{n:<2} ",
+                    report.http(429),
+                    (f"  retry-after: {retry_after}, window resets in {reset_in:.0f}s", "dim"),
+                )
             else:
-                print(f"  #{n:<2} HTTP 429")
+                report.line(f"  #{n:<2} ", report.http(429))
             continue
         allowed += 1
         spent += float(raw.headers["x-litellm-response-cost"])
-        print(f"  #{n:<2} HTTP 200")
-    print(f"  → {allowed} of {QUICK_REQUESTS} allowed")
+        report.line(f"  #{n:<2} ", report.http(200))
+    report.line((f"  → {allowed} of {QUICK_REQUESTS} allowed", "bold"))
     return RateLimitResult(allowed, retry_after, reset_in if limited else 0.0, spent)
 
 
 def budget_part(client: openai.OpenAI, spent: float) -> BudgetResult:
-    print(f"Part 2: budget, expensive requests until the gateway says no (budget ${BUDGET})")
-    print(f"  spend so far: ${spent:.4f} (part 1)")
+    report.section(f"Part 2: budget, expensive requests until the gateway says no (budget ${BUDGET})")
+    report.note(f"  spend so far: ${spent:.4f} (part 1)")
     crossing = None
     for n in range(1, MAX_BUDGET_REQUESTS + 1):
         try:
@@ -107,14 +112,14 @@ def budget_part(client: openai.OpenAI, spent: float) -> BudgetResult:
         except openai.APIStatusError as error:
             if "Budget has been exceeded" not in str(error):
                 raise
-            print(f"  #{n}  HTTP {error.status_code}  Budget has been exceeded")
+            report.line(f"  #{n}  ", report.http(error.status_code), "  Budget has been exceeded")
             return BudgetResult(crossing, n, error.status_code, spent)
         cost = float(raw.headers["x-litellm-response-cost"])
         crossed = spent < BUDGET <= spent + cost
         if crossed:
             crossing = Crossing(n, spent, spent + cost)
-        note = f"  ← crossed ${BUDGET}, still allowed" if crossed else ""
-        print(f"  #{n}  HTTP 200  ${spent:.4f} → ${spent + cost:.4f}{note}")
+        note = (f"  ← crossed ${BUDGET}, still allowed", "yellow") if crossed else ""
+        report.line(f"  #{n}  ", report.http(200), f"  ${spent:.4f} → ${spent + cost:.4f}", note)
         spent += cost
     raise LabError(f"the gateway never enforced the ${BUDGET} budget in {MAX_BUDGET_REQUESTS} requests")
 
@@ -160,7 +165,7 @@ def run(lab: Lab) -> None:
     report.header(
         f"throwaway key, team {PAYMENTS_AI.alias}: {RPM_LIMIT} requests/min, ${BUDGET} budget (deleted at the end)",
         f"part 1 {QUICK_PROMPT!r} (max_tokens=1) · part 2 a {len(LONG_PROMPT)}-char refund policy "
-        f"(max_tokens=20, ~$0.04 each):\n        {LONG_PROMPT[:90]}…",
+        f"(max_tokens=20, ~$0.04 each): {LONG_PROMPT[:90]}…",
     )
     with lab.gateway.temporary_key(
         "probe-limits", team=PAYMENTS_AI.alias, models=[CHAT_SMALL], rpm_limit=RPM_LIMIT, max_budget=BUDGET
@@ -173,6 +178,8 @@ def run(lab: Lab) -> None:
         with lab.gateway.admin() as admin:
             recorded = admin.key_spend(key)
 
-    print(f"\nSpend, summed from x-litellm-response-cost headers: ${budget.spent:.4f}")
-    print(f"Spend in Postgres (/key/info) right now:            ${recorded:.4f}")
+    spend = report.table("spend, according to", report.right("$"))
+    spend.add_row("x-litellm-response-cost headers, summed", f"{budget.spent:.4f}")
+    spend.add_row("Postgres (/key/info), right now", f"{recorded:.4f}")
+    report.show(spend)
     report.summary(*takeaways(quick, budget, recorded))

@@ -6,23 +6,26 @@
 import signal
 import sys
 import threading
+from dataclasses import dataclass
 from types import FrameType
 from typing import Annotated
 
 import typer
+from rich.text import Text
 
-from llm_bonsai import __version__
+from llm_bonsai import __version__, report
 from llm_bonsai.catalog import GATEWAY, LANGFUSE, PROMETHEUS
 from llm_bonsai.clients.tunnels import PortForward, port_in_use
 from llm_bonsai.config import LabConfig
 from llm_bonsai.errors import LabError
 from llm_bonsai.lab import Lab
+from llm_bonsai.models import Service
 from llm_bonsai.probe.cli import app as probe_app
 from llm_bonsai.setup import infra
 from llm_bonsai.setup.cli import app as setup_app
 
 app = typer.Typer(
-    help="A tiny local GenAI platform lab: LiteLLM + Langfuse + Ollama on Kubernetes.",
+    help="A real GenAI platform, deliberately kept tiny: LiteLLM, Ollama, Langfuse and Prometheus on Kubernetes.",
     no_args_is_help=True,
     # Locals in tracebacks would print API keys and passwords.
     pretty_exceptions_show_locals=False,
@@ -31,44 +34,53 @@ app.add_typer(setup_app, name="setup")
 app.add_typer(probe_app, name="probe")
 
 
+@dataclass(frozen=True)
+class Page:
+    service: Service
+    port: int
+    name: str
+    path: str
+    login: str
+
+    @property
+    def url(self) -> str:
+        return f"http://localhost:{self.port}{self.path}"
+
+
+# Fixed ports, unlike the commands' own tunnels: Langfuse's login only works on the
+# URL it was configured with (NEXTAUTH_URL=http://localhost:3000).
+PAGES = [
+    Page(LANGFUSE, 3000, "Langfuse", "", "LANGFUSE_INIT_USER_EMAIL / _PASSWORD from .env"),
+    Page(GATEWAY, 4000, "LiteLLM UI", "/ui", "user admin, password LITELLM_MASTER_KEY from .env"),
+]
+PROMETHEUS_PAGE = Page(PROMETHEUS, 9090, "Prometheus", "", "no login; Status → Targets lists the gateway pods")
+
+
 @app.command("ui")
 def ui(ctx: typer.Context) -> None:
     """Open Langfuse on localhost:3000, the LiteLLM UI on localhost:4000 and, if installed, Prometheus on
     localhost:9090, until Ctrl-C."""
     kube = Lab.of(ctx).kube
-    # Fixed ports, unlike the commands' own tunnels: Langfuse's login only works on the
-    # URL it was configured with (NEXTAUTH_URL=http://localhost:3000).
-    pages = [
-        (
-            LANGFUSE,
-            3000,
-            "Langfuse:   http://localhost:3000     log in with LANGFUSE_INIT_USER_EMAIL / _PASSWORD from .env",
-        ),
-        (GATEWAY, 4000, "LiteLLM UI: http://localhost:4000/ui  log in as admin with LITELLM_MASTER_KEY from .env"),
-    ]
+    pages = list(PAGES)
     if kube.kubectl(
         "get", "service", PROMETHEUS.name, "--ignore-not-found", "-o", "name", namespace=PROMETHEUS.namespace
     ):
-        pages.append(
-            (
-                PROMETHEUS,
-                9090,
-                "Prometheus: http://localhost:9090     no login; Status → Targets shows the gateway pods",
-            )
-        )
-    busy = [port for _, port, _ in pages if port_in_use(port)]
+        pages.append(PROMETHEUS_PAGE)
+    busy = [page.port for page in pages if port_in_use(page.port)]
     if busy:
         raise LabError(f"port {' and '.join(map(str, busy))} already in use (an old `kubectl port-forward`?)")
-    forwards = [PortForward(kube, service, port) for service, port, _ in pages]
+    forwards = [PortForward(kube, page.service, page.port) for page in pages]
     try:
         for forward in forwards:
             forward.open()
-        for _, _, how_to in pages:
-            print(how_to)
-        print("Ctrl-C closes them.", flush=True)
+        open_pages = report.table("", "URL", "log in", title="Forwarded to this machine")
+        for page in pages:
+            open_pages.add_row(Text(page.name, style="bold"), page.url, page.login)
+        report.console.print(open_pages)
+        report.note("Ctrl-C closes them.")
         threading.Event().wait()
     except KeyboardInterrupt:
-        print("\nclosed")
+        report.note("\nclosed")
     finally:
         for forward in forwards:
             forward.close()
@@ -119,5 +131,5 @@ def main() -> None:
     try:
         app()
     except LabError as error:
-        print(f"error: {error}", file=sys.stderr)
+        report.error(str(error))
         sys.exit(1)

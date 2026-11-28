@@ -5,6 +5,7 @@ import time
 from collections.abc import Iterable
 from typing import Any
 
+from llm_bonsai import report
 from llm_bonsai.clients.shell import run
 from llm_bonsai.config import LabConfig, infra_file
 from llm_bonsai.errors import LabError
@@ -27,12 +28,16 @@ class Kube:
 
     def apply_file(self, relative: str) -> None:
         """`kubectl apply` a manifest under infra/."""
-        print(self.kubectl("apply", "-f", str(infra_file(relative))), end="", flush=True)
+        report.console.print(
+            self.kubectl("apply", "-f", str(infra_file(relative))), end="", style="dim", soft_wrap=True
+        )
 
     def apply_objects(self, objects: Iterable[dict[str, Any]]) -> None:
         """`kubectl apply` objects built in Python, so re-runs update instead of failing."""
         manifest = {"apiVersion": "v1", "kind": "List", "items": list(objects)}
-        print(self.kubectl("apply", "-f", "-", stdin=json.dumps(manifest)), end="", flush=True)
+        report.console.print(
+            self.kubectl("apply", "-f", "-", stdin=json.dumps(manifest)), end="", style="dim", soft_wrap=True
+        )
 
     def rollout_status(self, workload: str, namespace: str, timeout_s: int) -> None:
         self.kubectl("rollout", "status", workload, f"--timeout={timeout_s}s", namespace=namespace)
@@ -48,10 +53,10 @@ class Kube:
             if remaining <= 0:
                 raise LabError(f"timed out before {namespace}/{workload} was ready")
             if not quiet:
-                print(f"waiting for {namespace}/{workload} (up to {remaining}s)…", flush=True)
+                report.note(f"waiting for {namespace}/{workload} (up to {remaining}s)…")
             self.rollout_status(workload, namespace, remaining)
         if not quiet:
-            print(f"all {len(workloads)} workloads in {namespace} are ready")
+            report.line(("✓ ", "green"), f"all {len(workloads)} workloads in {namespace} are ready")
 
     def wait_for_crds(self, *crds: str) -> None:
         self.kubectl("wait", "--for=condition=Established", "--timeout=120s", *(f"crd/{crd}" for crd in crds))
