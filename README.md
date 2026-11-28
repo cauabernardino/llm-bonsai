@@ -1,5 +1,7 @@
 # llm-bonsai
 
+[![check](https://github.com/cauabernardino/llm-bonsai/actions/workflows/check.yml/badge.svg)](https://github.com/cauabernardino/llm-bonsai/actions/workflows/check.yml)
+
 > A real GenAI platform, deliberately kept tiny. Same structure, carefully pruned to fit small machines.
 
 llm-bonsai runs the core of a GenAI platform in a local Kubernetes cluster, with **no paid API keys**:

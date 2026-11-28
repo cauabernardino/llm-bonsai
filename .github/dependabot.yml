@@ -1,0 +1,9 @@
+# Bumps the pinned actions monthly, skipping releases younger than a week.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
