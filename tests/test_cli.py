@@ -17,7 +17,7 @@ def subcommands(*path: str) -> set[str]:
 
 
 def test_command_tree() -> None:
-    assert subcommands() == {"setup", "probe", "ui", "teardown"}
+    assert subcommands() == {"setup", "probe", "ui", "chat", "teardown"}
     assert subcommands("setup") == {
         "preflight", "cluster", "namespaces", "secrets", "ollama", "postgres", "valkey",
         "cert-manager", "clickhouse-operator", "langfuse", "litellm", "all", "teams", "prometheus",

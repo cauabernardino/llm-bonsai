@@ -119,6 +119,25 @@ Things worth opening:
 - **Experiment comparison:** run `probe eval` and then `probe eval --prompt strict`. The second prints a side-by-side link.
 - **Metrics:** Prometheus → Status → Targets shows the gateway pods `UP`; paste the queries from [Metrics](#metrics) into Query.
 
+### Chat with the model
+
+```
+$ llm-bonsai chat --system "You are a concise assistant."
+Model     chat-small, through the gateway as support-bot
+Session   http://localhost:3000/project/llm-bonsai/sessions/chat-b3a7bb48 (`llm-bonsai ui` first)
+Commands  /reset, /exit, /help
+
+you My name is Ana and I like bonsai trees. Reply in one sentence.
+model Ana enjoys cultivating bonsai trees, a fascinating hobby that involves shaping miniature trees to artful forms.
+4.7s · first token 2.15s · 21 tokens
+
+you What is my name?
+model Your name is Ana.
+1.0s · first token 0.40s · 6 tokens
+```
+
+Replies stream token by token. The CLI keeps the history and sends it with every turn, because the gateway and the model are stateless: `/reset` (or `/clear`) drops it, and the model forgets. Ctrl-C stops a reply early; `/exit`, `/quit`, `exit` or Ctrl-D leaves. Anything starting with `/` is a command and never reaches the model. What you type while a reply streams isn't echoed into it; it shows up at the next prompt instead. Each turn is an ordinary request with the support-bot key, so it counts against the team's limits and budget, and the whole conversation is one **Langfuse session** (`metadata.session_id`). `--model` picks another model group.
+
 ### Talk to the gateway yourself
 
 With `llm-bonsai ui` running in another terminal:
@@ -404,6 +423,7 @@ src/llm_bonsai/           the package behind the `llm-bonsai` command
   catalog.py              namespaces, Services, model groups, teams
   models.py               shared records
   assistant.py            the demo support assistant
+  chat.py                 `llm-bonsai chat`: a streamed conversation through the gateway
   report.py               output conventions every probe follows
   clients/                shell, Kube (pinned kubectl/helm), port-forward tunnels, Gateway, Langfuse
   setup/                  one module per `setup` concern: preflight, credentials, infra, teams, prometheus

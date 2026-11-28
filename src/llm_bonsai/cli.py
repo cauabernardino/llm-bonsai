@@ -13,8 +13,8 @@ from typing import Annotated
 import typer
 from rich.text import Text
 
-from llm_bonsai import __version__, report
-from llm_bonsai.catalog import GATEWAY, LANGFUSE, PROMETHEUS
+from llm_bonsai import __version__, chat, report
+from llm_bonsai.catalog import CHAT_SMALL, GATEWAY, LANGFUSE, PROMETHEUS
 from llm_bonsai.clients.tunnels import PortForward, port_in_use
 from llm_bonsai.config import LabConfig
 from llm_bonsai.errors import LabError
@@ -84,6 +84,16 @@ def ui(ctx: typer.Context) -> None:
     finally:
         for forward in forwards:
             forward.close()
+
+
+@app.command("chat")
+def chat_command(
+    ctx: typer.Context,
+    model: Annotated[str, typer.Option(help="Gateway model group to talk to.")] = CHAT_SMALL,
+    system: Annotated[str | None, typer.Option(help="A system prompt for the whole conversation.")] = None,
+) -> None:
+    """Chat with a model through the gateway, streamed; the conversation is one Langfuse session."""
+    chat.run(Lab.of(ctx), model, system)
 
 
 @app.command("teardown")
