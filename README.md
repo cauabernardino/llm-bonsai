@@ -486,6 +486,10 @@ Prometheus is the only optional piece today, and `setup all` doesn't install it.
 
 All credentials are random, dev-only values in a gitignored `.env`. Nothing listens beyond `localhost`: access goes only through `kubectl port-forward`, opened per command. The gateway's Valkey runs without auth inside the cluster. No real provider keys are needed or used; a cloud model would only ever appear as a commented-out entry in `src/llm_bonsai/infra/litellm/values.yaml`, reading its key from the environment.
 
+## Changelog
+
+Each version's changes are on the [Releases](https://github.com/cauabernardino/llm-bonsai/releases) page.
+
 ## License
 
 [Apache License 2.0](LICENSE). Use, change and share it as you like, including commercially. If you redistribute it or something built on it, keep the [NOTICE](NOTICE) file with it, which credits the original project, and mark the files you changed.

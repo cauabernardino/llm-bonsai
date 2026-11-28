@@ -51,4 +51,21 @@ Model groups, teams and their limits are in `src/llm_bonsai/catalog.py`. The gat
 
 - Type everything. `make check` runs both mypy and pyright in strict mode.
 - Comments explain why, not what. Leave out notes about how the code came to be.
-- Commits get a title that says what changed and a short body that says why. One concern per commit.
+- Commits get a title that says what changed and a short body that says why. One concern per commit. Pull requests are squash-merged, so the PR title becomes the commit title.
+
+## Releasing
+
+For maintainers. Releases are cut by hand, whenever there's something worth shipping. The commit titles since the last tag become the release notes, and the [Releases](https://github.com/cauabernardino/llm-bonsai/releases) page is the changelog.
+
+1. Open a pull request that bumps the version: `uv version --bump minor` (or `patch`, `major`) updates `pyproject.toml` and `uv.lock`. Title it `Release X.Y.Z`.
+2. Once it's merged, tag the merge commit and push only the tag:
+
+   ```bash
+   git switch main && git pull
+   git tag "v$(uv version --short)"
+   git push origin "v$(uv version --short)"   # the release workflow checks, builds and creates the GitHub Release
+   ```
+
+The workflow refuses a tag that isn't on `main` or doesn't match the version in `pyproject.toml`. If it fails, fix the cause through a pull request, then move the tag to the new commit: `git push origin :refs/tags/vX.Y.Z`, tag again and push.
+
+Before 1.0, a minor bump may break things. When one does, add a line saying so to its release notes (`gh release edit` or the Releases page).

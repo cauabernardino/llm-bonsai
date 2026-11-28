@@ -39,6 +39,7 @@ Homepage = "https://github.com/cauabernardino/llm-bonsai"
 Documentation = "https://github.com/cauabernardino/llm-bonsai#readme"
 Repository = "https://github.com/cauabernardino/llm-bonsai"
 Issues = "https://github.com/cauabernardino/llm-bonsai/issues"
+Changelog = "https://github.com/cauabernardino/llm-bonsai/releases"
 
 [project.scripts]
 llm-bonsai = "llm_bonsai.cli:main"
