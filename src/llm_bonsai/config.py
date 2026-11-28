@@ -1,7 +1,7 @@
 """Where the lab lives: its home (holding .env), the manifests it installs, and the cluster context."""
 
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -56,11 +56,14 @@ class EnvFile:
         self._create()
         set_key(self.path, name, value)
 
+    def missing(self, names: Iterable[str]) -> list[str]:
+        existing = dotenv_values(self.path) if self.path.exists() else {}
+        return [name for name in names if not existing.get(name)]
+
     def fill_missing(self, generators: Mapping[str, Callable[[], str]]) -> list[str]:
         """Generate the values that are missing and return their names; existing ones are kept."""
+        added = self.missing(generators)
         self._create()
-        existing = dotenv_values(self.path)
-        added = [name for name in generators if not existing.get(name)]
         for name in added:
             set_key(self.path, name, generators[name]())
         return added

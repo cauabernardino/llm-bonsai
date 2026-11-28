@@ -22,11 +22,14 @@ class FakeLiteLLM:
     def __init__(self, teams: dict[str, str], valid_keys: tuple[str, ...] = ()) -> None:
         self.teams = dict(teams)  # alias -> id
         self.valid_keys = set(valid_keys)
+        self.blocked_keys: set[str] = set()
         self.users: dict[str, str] = {}  # id -> role
         self.calls: list[tuple[str, Any]] = []
+        self.urls: list[str] = []
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
+        self.urls.append(str(request.url))
         body = json.loads(request.content) if request.content else dict(request.url.params)
         self.calls.append((path, body))
         if path == "/team/list":
@@ -34,10 +37,11 @@ class FakeLiteLLM:
         if path == "/team/new":
             self.teams[body["team_alias"]] = f"id-{body['team_alias']}"
             return httpx.Response(200, json={"team_id": self.teams[body["team_alias"]]})
-        if path == "/key/info":
-            if body["key"] not in self.valid_keys:
-                return httpx.Response(404)
-            return httpx.Response(200, json={"info": {"spend": 0.0123}})
+        if path == "/v2/key/info":
+            rows = [
+                {"spend": 0.0123, "blocked": key in self.blocked_keys} for key in body["keys"] if key in self.valid_keys
+            ]
+            return httpx.Response(200, json={"key": body["keys"], "info": rows})
         if path == "/user/info":
             return httpx.Response(200 if body["user_id"] in self.users else 404, json={})
         if path == "/user/new":
@@ -61,6 +65,25 @@ def test_team_id_of_a_missing_team_points_at_setup_teams() -> None:
 
 def test_key_spend_reads_key_info() -> None:
     assert FakeLiteLLM({}, valid_keys=("sk-1",)).admin().key_spend("sk-1") == 0.0123
+
+
+def test_key_spend_of_an_unknown_key_fails_clearly() -> None:
+    with pytest.raises(LabError, match="no live key"):
+        FakeLiteLLM({}).admin().key_spend("sk-gone")
+
+
+def test_a_blocked_key_is_not_valid() -> None:
+    fake = FakeLiteLLM({}, valid_keys=("sk-1",))
+    fake.blocked_keys.add("sk-1")
+    assert not fake.admin().key_is_valid("sk-1")
+
+
+def test_keys_never_go_in_the_url() -> None:
+    fake = FakeLiteLLM({}, valid_keys=("sk-1",))
+    admin = fake.admin()
+    admin.key_is_valid("sk-1")
+    admin.key_spend("sk-1")
+    assert fake.urls and all("sk-1" not in url for url in fake.urls)
 
 
 def test_ensure_teams_creates_teams_and_saves_new_keys(tmp_path: Path) -> None:

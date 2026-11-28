@@ -32,9 +32,14 @@ def namespaces(ctx: typer.Context) -> None:
 
 
 @app.command("secrets")
-def secrets(ctx: typer.Context) -> None:
+def secrets(
+    ctx: typer.Context,
+    force: Annotated[
+        bool, typer.Option("--force", help="Generate missing values even if the lab already has its Secrets.")
+    ] = False,
+) -> None:
     """Fill .env with random dev secrets (keeping existing ones) and apply them as Kubernetes Secrets."""
-    Lab.of(ctx).installer.install_secrets()
+    Lab.of(ctx).installer.install_secrets(force)
 
 
 @app.command("ollama")

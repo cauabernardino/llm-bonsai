@@ -292,7 +292,7 @@ Part 1: rate limit, 10 requests in a row
 Part 2: budget $0.05
   #1  HTTP 200  $0.0096 → $0.0522  ← crossed $0.05, still allowed
   #2  HTTP 422  Budget has been exceeded
-Spend in Postgres (/key/info) right now: $0.0096
+Spend in Postgres (/v2/key/info) right now: $0.0096
 ```
 
 - **429** for rate limits: back off and retry. **422** for budgets: retrying won't help until someone raises the budget.
@@ -411,7 +411,7 @@ The CLI ships its Helm values and manifests inside the package (`src/llm_bonsai/
 2. else the checkout, when running from one with `uv run`;
 3. else `~/.config/llm-bonsai/` (or `$XDG_CONFIG_HOME/llm-bonsai/`), which is where an installed CLI keeps it.
 
-**A different lab home means a different `.env`.** `setup secrets` against an already running lab with a fresh `.env` applies new passwords that no longer match the existing databases. To drive a lab you built with `uv run` from the installed CLI, run `export LLM_BONSAI_HOME=/path/to/llm-bonsai`.
+**A different lab home means a different `.env`.** New passwords for a running lab wouldn't match its databases, so `setup secrets` refuses to generate them while the lab's Secrets exist (`--force` overrides). To drive a lab you built with `uv run` from the installed CLI, run `export LLM_BONSAI_HOME=/path/to/llm-bonsai`.
 
 ## Repository layout
 
@@ -469,6 +469,7 @@ Prometheus is the only optional piece today, and `setup all` doesn't install it.
 | `could not port-forward svc/...` | The cluster is down, or the lab isn't installed. | `minikube start -p llm-bonsai`, or `llm-bonsai setup all`. |
 | `no kube context 'llm-bonsai'` | The lab's cluster doesn't exist yet, or it was created by an earlier version in the `minikube` profile. | `llm-bonsai setup cluster`, or `export LLM_BONSAI_CONTEXT=minikube`. |
 | `teardown`: `namespace … wasn't created by llm-bonsai` | `llm` or `observability` exists without the lab's label: someone else's, or created by an earlier version. | If it's the lab's, `llm-bonsai setup namespaces` labels it; otherwise leave it alone. |
+| `setup secrets`: `… lacks N generated values, but the cluster already has …` | `.env` is new or incomplete (a different lab home, or the file was lost) while the lab's database passwords are still in the cluster. | Set `LLM_BONSAI_HOME` to the directory with the original `.env`. If it's gone, `llm-bonsai teardown` (which wipes the data) and then `setup all`. |
 | A probe says `the gateway didn't answer` | The gateway pod is restarting or still starting. | `kubectl -n llm get pods` and the gateway's logs. |
 | 2 gateway replicas left running after killing `probe replicas` | It restores on errors and a single Ctrl-C, not when killed outright. | `llm-bonsai setup litellm`. |
 | `connection refused` on `localhost:3000`, `:4000` or `:9090` | Only `llm-bonsai ui` forwards those ports. | Run `llm-bonsai ui`. |

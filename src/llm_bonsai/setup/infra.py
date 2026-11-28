@@ -126,12 +126,30 @@ class Installer:
     def install_namespaces(self) -> None:
         self._kube.apply_file("namespaces.yaml")
 
-    def install_secrets(self) -> None:
+    def install_secrets(self, force: bool = False) -> None:
+        missing = self._env.missing(credentials.GENERATORS)
+        if missing and not force:
+            self._refuse_to_replace_persisted_secrets(missing)
         added = self._env.fill_missing(credentials.GENERATORS)
         report.line(
             (f"{self._env.path}: ", "bold"), f"added {', '.join(added)}" if added else "nothing to add (all present)"
         )
         self._kube.apply_objects(credentials.kubernetes_secrets(self._env))
+
+    def _refuse_to_replace_persisted_secrets(self, missing: list[str]) -> None:
+        """New values for a lab that already has its Secrets wouldn't match its databases."""
+        found = [
+            f"{namespace}/{name}"
+            for name, namespace in credentials.PERSISTED_SECRETS
+            if self._kube.kubectl("get", "secret", name, "--ignore-not-found", "-o", "name", namespace=namespace)
+        ]
+        if found:
+            raise LabError(
+                f"{self._env.path} lacks {len(missing)} generated values, but the cluster already has "
+                f"{', '.join(found)}: new passwords wouldn't match the ones its databases started with. "
+                "Point LLM_BONSAI_HOME at the directory whose .env built this lab, or wipe the lab with "
+                "`llm-bonsai teardown` first. `llm-bonsai setup secrets --force` writes new ones anyway."
+            )
 
     def install_ollama(self) -> None:
         self._kube.helm_upgrade(OLLAMA)
@@ -223,11 +241,21 @@ class Installer:
             partial(kubectl, "delete", "pvc", "--all", namespace=LLM_NAMESPACE),
             self.delete_orphaned_volumes,
         ]
+        skipped = False
         for step in steps:
             try:
                 report.console.print(step(), end="", soft_wrap=True)
             except LabError as error:
                 report.note(f"skipped: {error}")
+                skipped = True
+        if skipped:
+            report.note("kept the database Secrets: some of the data they protect may still be there")
+            return
+        # Their passwords belonged to the data just deleted, so the next `setup secrets` may write new ones.
+        for name, namespace in credentials.PERSISTED_SECRETS:
+            report.console.print(
+                kubectl("delete", "secret", name, "--ignore-not-found", namespace=namespace), end="", soft_wrap=True
+            )
 
     def delete_orphaned_volumes(self) -> str:
         """Delete what the provisioner may have left behind (see `orphaned_volumes`)."""
