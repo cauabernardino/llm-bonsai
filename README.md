@@ -47,7 +47,7 @@ Two namespaces: `llm` (Ollama, LiteLLM, Postgres, Valkey) and `observability` (L
 | 4 | Gateway probes: fallback, limits, cache, replicas, chaos, load test | ✅ |
 | 4b | Tooling packaged as the `llm-bonsai` CLI | ✅ |
 | 5 | App tracing with nested spans, prompt versions, a mini eval | ✅ |
-| 6 | Prometheus metrics (optional): the gateway's `/metrics` | ✅ part 1 (no Prometheus pod yet) |
+| 6 | Prometheus metrics (optional): the gateway's `/metrics`, scraped by one Prometheus pod | ✅ |
 | 7 | vLLM on CPU (optional) | planned |
 | 8 | Argo CD (optional) | planned |
 
@@ -90,10 +90,10 @@ make up             # everything: Ollama, Postgres, Valkey, Langfuse (+ prerequi
                     # ~6 min the first time, mostly image pulls
 make bootstrap      # create teams and their virtual keys, saved to .env
 make smoke          # end-to-end check through the gateway
-make ui             # Langfuse on localhost:3000, LiteLLM's UI on localhost:4000, until Ctrl-C
+make ui             # Langfuse on localhost:3000, LiteLLM's UI on localhost:4000 (+ Prometheus on :9090 if installed), until Ctrl-C
 ```
 
-**No port-forward to babysit.** Every command that talks to the gateway or Langfuse opens its own `kubectl port-forward` on a free local port, reconnects it if the pod behind it goes away, and closes it when the command exits. Only `make ui` holds the fixed ports 3000 and 4000, for your browser and for `curl`, and only while it runs.
+**No port-forward to babysit.** Every command that talks to the gateway or Langfuse opens its own `kubectl port-forward` on a free local port, reconnects it if the pod behind it goes away, and closes it when the command exits. Only `make ui` holds fixed ports (3000, 4000, and 9090 for the optional Prometheus), for your browser and for `curl`, and only while it runs.
 
 The `make` targets are shortcuts for the CLI, which does all the work. `make up` is `uv run llm-bonsai setup all`, which runs these steps in order; each one can also be run on its own, and all are safe to re-run:
 
@@ -131,6 +131,7 @@ infra/
   litellm/values.yaml     Helm values for the LiteLLM chart, including the model config
   cert-manager/values.yaml
   langfuse/values.yaml    Helm values for the Langfuse chart, sized for a laptop
+  prometheus/prometheus.yaml  optional: one Prometheus pod scraping the gateway (Phase 6)
 src/llm_bonsai/           the Python package behind the `llm-bonsai` command
   cli.py                  the root command: setup / probe / ui / teardown
   lab.py                  Lab: the clients one command uses, closed (with its port-forwards) when it ends
@@ -150,6 +151,7 @@ src/llm_bonsai/           the Python package behind the `llm-bonsai` command
     credentials.py        random dev secrets into .env, then into Kubernetes Secrets
     infra.py              pinned charts, the cluster, and Installer (one method per install step)
     teams.py              teams + virtual keys
+    prometheus.py         Prometheus's scrape key: a read-only admin limited to /metrics
   probe/                  `llm-bonsai probe …`
     smoke.py              end-to-end gateway check, including traces in Langfuse
     fallback.py limits.py cache.py replicas.py chaos.py
@@ -661,7 +663,35 @@ How to read it:
 - **Budgets:** the keys have budgets (`remaining_api_key_budget` 999.991 of 1000), the teams don't, so their remaining budget is `+Inf`.
 - **Even the rejected scrapes are counted:** they show up as `route="/metrics"`, `status_code="401"`.
 - **Cardinality:** labels include `hashed_api_key`, `client_ip`, `user_agent` and `end_user`, so every new key or client adds series. That's harmless at lab scale, but at real scale it's the first thing to trim (`litellm_settings.prometheus_exclude_labels`).
-- Not shown here: a Prometheus server scraping this over time (the optional second part of this phase), and queue depth, which only the model server knows (vLLM's `num_requests_waiting`, Phase 7).
+- Not shown here: queue depth, which only the model server knows (vLLM's `num_requests_waiting`, Phase 7).
+
+### Prometheus: the same metrics over time
+
+```sh
+uv run llm-bonsai setup prometheus   # optional, not part of `make up`; needs the gateway running
+make ui                              # now also serves Prometheus on localhost:9090
+```
+
+This adds one Prometheus pod (`infra/prometheus/prometheus.yaml`: a plain manifest, a day of retention in an `emptyDir`, a 512Mi memory limit) that scrapes the gateway every 15 s. Prometheus has no login; its **Status → Targets** page should show each gateway pod as `UP`. Some queries to paste into its **Query** page:
+
+| Question | PromQL |
+|---|---|
+| Requests per second, by team, model and status | `sum by (team_alias, requested_model, status_code) (rate(litellm_proxy_total_requests_metric_total{route="/v1/chat/completions"}[5m]))` |
+| Spend per key in the last hour (fake prices) | `sum by (api_key_alias) (increase(litellm_spend_metric_total[1h]))` |
+| Fallbacks, from which model group to which | `sum by (requested_model, fallback_model) (litellm_deployment_successful_fallbacks_total)` |
+| p95 end-to-end latency per model group | `histogram_quantile(0.95, sum by (le, model_group) (rate(litellm_request_total_latency_metric_bucket[5m])))` |
+| How many series the gateway exports | `count({job="litellm"})` |
+
+The `rate`/`increase` queries only see traffic inside their window, so run `make smoke` a couple of times first. Over an idle window the latency quantile is `NaN` (0/0). After two smoke runs: p95 0.90 s for `chat-small`, 0.48 s for `embed`.
+
+How it's wired:
+
+- **Its own key, not the master key.** `setup prometheus` creates a read-only admin user (`proxy_admin_viewer`) and a key for it that may only call `/metrics` (`allowed_routes`), saves the key to `.env` as `LITELLM_KEY_PROMETHEUS`, and mounts it into the pod from a Secret (`authorization.credentials_file`, read again on every scrape). Measured: that key scrapes fine, but gets 403 on chat completions and on the management API. A plain team key can't scrape at all. A viewer key *without* the route limit could still call models and spend budget.
+- **It scrapes pods, not the Service.** Prometheus lists the gateway pods through the Kubernetes API (`kubernetes_sd_configs`, allowed by a Role that can only read pods in `llm`). Scraping the Service would reach a different pod on each scrape once there are 2 replicas, so the counters would jump back and forth. With `--set gateway.replicaCount=2`, Targets showed both pods `UP`.
+- **The path is `/metrics/`**, to skip the redirect.
+- **Cardinality in practice:** after a smoke run and two `probe fallback` runs, the gateway exported ~620 series. Each throwaway probe key (`probe-fallback-…`) adds its own series, which stay around for the whole retention window even after the key is deleted.
+- **It's cheap:** the pod used ~36 MiB.
+- Not shown here: Grafana dashboards and alerting rules. In production you'd run this through the Prometheus Operator (kube-prometheus-stack), with a `ServiceMonitor` and a recording rule per question above.
 
 ---
 
@@ -720,3 +750,4 @@ This is a local lab. All credentials are random, dev-only values in a gitignored
 | Langfuse chart / app | 2.3.0 / 4.83.0 |
 | ClickHouse / Keeper | 26.8.36.3 |
 | Langfuse Python SDK | 5.2.0 |
+| Prometheus (optional) | v3.16.0 |

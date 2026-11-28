@@ -7,6 +7,8 @@ OBSERVABILITY_NAMESPACE = "observability"
 
 GATEWAY = Service(LLM_NAMESPACE, "litellm", 4000)
 LANGFUSE = Service(OBSERVABILITY_NAMESPACE, "langfuse-web", 3000)
+# Optional (`llm-bonsai setup prometheus`): not part of `setup all`.
+PROMETHEUS = Service(OBSERVABILITY_NAMESPACE, "prometheus", 9090)
 # Where `llm-bonsai ui` serves Langfuse (its login only works there), and the project headless init creates.
 LANGFUSE_UI_URL = "http://localhost:3000"
 LANGFUSE_PROJECT_ID = "llm-bonsai"

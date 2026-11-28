@@ -140,6 +140,14 @@ class Installer:
         self._kube.helm_upgrade(LANGFUSE)
         self._kube.wait_ready(OBSERVABILITY_NAMESPACE, timeout_s=900)
 
+    def install_prometheus(self, scrape_key: str) -> None:
+        """Optional, so not part of `install_all`. The gateway must be up to issue `scrape_key`."""
+        self._kube.apply_objects(
+            [credentials.secret("prometheus-litellm", OBSERVABILITY_NAMESPACE, {"key": scrape_key})]
+        )
+        self._kube.apply_file("prometheus/prometheus.yaml")
+        self._kube.rollout_status("deployment/prometheus", OBSERVABILITY_NAMESPACE, timeout_s=180)
+
     def install_litellm(self, set_values: Iterable[str] = (), quiet: bool = False) -> None:
         """Postgres must be up first: migrations run as a pre-install hook.
 
@@ -172,7 +180,9 @@ class Installer:
         prerequisites (cert-manager, the ClickHouse operator). Missing pieces are skipped."""
         helm, kubectl = self._kube.helm, self._kube.kubectl
         manifests = [str(self._kube.config.infra_file(f)) for f in ("valkey/valkey.yaml", "postgres/postgres.yaml")]
+        prometheus = str(self._kube.config.infra_file("prometheus/prometheus.yaml"))
         steps: list[Callable[[], str]] = [
+            partial(kubectl, "delete", "--ignore-not-found", "-f", prometheus),
             partial(helm, "uninstall", LANGFUSE.release, "-n", LANGFUSE.namespace, "--wait"),
             partial(kubectl, "delete", "pvc", "--all", namespace=OBSERVABILITY_NAMESPACE),
             partial(helm, "uninstall", LITELLM.release, "-n", LITELLM.namespace),

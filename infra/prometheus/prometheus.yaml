@@ -1,0 +1,141 @@
+# One Prometheus pod scraping the LiteLLM gateway. No operator, no Grafana: the built-in UI is enough.
+#
+# It finds gateway pods through the Kubernetes API instead of scraping the Service, which would hit
+# a different pod on every scrape whenever there are 2 replicas (`probe replicas`).
+# The scrape key comes from the prometheus-litellm Secret, made by `llm-bonsai setup prometheus`.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: observability
+---
+# Read-only access to pods in the gateway's namespace, for service discovery.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: prometheus-discovery
+  namespace: llm
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: prometheus-discovery
+  namespace: llm
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: prometheus-discovery
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: observability
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus
+  namespace: observability
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+
+    storage:
+      tsdb:
+        retention:
+          time: 1d
+          size: 512MB
+
+    scrape_configs:
+      - job_name: litellm
+        # /metrics answers 307 to /metrics/; ask for the real path directly.
+        metrics_path: /metrics/
+        authorization:
+          credentials_file: /etc/prometheus/litellm/key
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: [llm]
+        relabel_configs:
+          # Only the gateway's container port, not the migrations Job's pod (it shares the name label).
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_component, __meta_kubernetes_pod_container_port_name]
+            regex: proxy;http
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: observability
+spec:
+  selector:
+    app: prometheus
+  ports:
+    - name: http
+      port: 9090
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: observability
+spec:
+  replicas: 1
+  # Two pods must never share the TSDB directory, so the old one stops before the new one starts.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      serviceAccountName: prometheus
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v3.16.0
+          args:
+            - --config.file=/etc/prometheus/config/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            # Picks up ConfigMap edits (kubelet syncs the file within ~1 min) without a restart.
+            # That's why the config is mounted as a directory: a subPath mount never gets updates.
+            - --config.auto-reload
+          ports:
+            - name: http
+              containerPort: 9090
+          readinessProbe:
+            httpGet: { path: /-/ready, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /-/healthy, port: http }
+            periodSeconds: 15
+          volumeMounts:
+            - { name: config, mountPath: /etc/prometheus/config, readOnly: true }
+            - { name: litellm-key, mountPath: /etc/prometheus/litellm, readOnly: true }
+            - { name: data, mountPath: /prometheus }
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus
+        - name: litellm-key
+          secret:
+            secretName: prometheus-litellm
+        # A day of lab metrics; lost when the pod is replaced, which is fine here.
+        - name: data
+          emptyDir:
+            sizeLimit: 1Gi

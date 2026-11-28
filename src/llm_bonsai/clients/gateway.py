@@ -60,6 +60,18 @@ class GatewayAdmin:
         response = self._http.post("/key/generate", json={"team_id": team_id, "key_alias": alias, **limits})
         return str(response.raise_for_status().json()["key"])
 
+    def ensure_user(self, user_id: str, role: str) -> None:
+        """Create the user without a key of its own; one that already exists is left alone."""
+        if self._http.get("/user/info", params={"user_id": user_id}).status_code == 200:
+            return
+        body = {"user_id": user_id, "user_role": role, "auto_create_key": False}
+        self._http.post("/user/new", json=body).raise_for_status()
+
+    def generate_user_key(self, user_id: str, alias: str, **limits: Any) -> str:
+        """A key acting as the user (and with its role), not as a team."""
+        response = self._http.post("/key/generate", json={"user_id": user_id, "key_alias": alias, **limits})
+        return str(response.raise_for_status().json()["key"])
+
     def update_key(self, key: str, **limits: Any) -> None:
         self._http.post("/key/update", json={"key": key, **limits}).raise_for_status()
 

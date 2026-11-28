@@ -12,15 +12,17 @@ from llm_bonsai.clients.gateway import GatewayAdmin
 from llm_bonsai.config import EnvFile
 from llm_bonsai.errors import LabError
 from llm_bonsai.models import GatewayPod, Observation
+from llm_bonsai.setup.prometheus import SCRAPE_KEY_ENV, SCRAPE_LIMITS, ensure_scrape_key
 from llm_bonsai.setup.teams import ensure_teams
 
 
 class FakeLiteLLM:
-    """Just enough of LiteLLM's /team and /key endpoints, recording every call."""
+    """Just enough of LiteLLM's /team, /key and /user endpoints, recording every call."""
 
     def __init__(self, teams: dict[str, str], valid_keys: tuple[str, ...] = ()) -> None:
         self.teams = dict(teams)  # alias -> id
         self.valid_keys = set(valid_keys)
+        self.users: dict[str, str] = {}  # id -> role
         self.calls: list[tuple[str, Any]] = []
 
     def handle(self, request: httpx.Request) -> httpx.Response:
@@ -36,6 +38,11 @@ class FakeLiteLLM:
             if body["key"] not in self.valid_keys:
                 return httpx.Response(404)
             return httpx.Response(200, json={"info": {"spend": 0.0123}})
+        if path == "/user/info":
+            return httpx.Response(200 if body["user_id"] in self.users else 404, json={})
+        if path == "/user/new":
+            self.users[body["user_id"]] = body["user_role"]
+            return httpx.Response(200, json={})
         if path == "/key/generate":
             return httpx.Response(200, json={"key": f"sk-{body['key_alias']}"})
         return httpx.Response(200, json={})
@@ -78,6 +85,36 @@ def test_ensure_teams_keeps_a_valid_key_and_updates_its_limits(tmp_path: Path) -
     assert env.get(team.env_var) == "sk-existing"
     assert ("/key/update", {"key": "sk-existing", **team.key_limits()}) in fake.calls
     assert "/team/new" not in fake.paths()
+
+
+def test_scrape_key_belongs_to_a_read_only_admin_and_only_reaches_metrics(tmp_path: Path) -> None:
+    fake, env = FakeLiteLLM({}), EnvFile(tmp_path / ".env")
+
+    key = ensure_scrape_key(fake.admin(), env)
+
+    assert fake.users == {"prometheus": "proxy_admin_viewer"}
+    generated = next(body for path, body in fake.calls if path == "/key/generate")
+    assert generated == {"user_id": "prometheus", "key_alias": "prometheus-scrape", **SCRAPE_LIMITS}
+    assert env.get(SCRAPE_KEY_ENV) == key == "sk-prometheus-scrape"
+
+
+def test_scrape_key_is_kept_while_valid(tmp_path: Path) -> None:
+    env = EnvFile(tmp_path / ".env")
+    env.set(SCRAPE_KEY_ENV, "sk-existing")
+    fake = FakeLiteLLM({}, valid_keys=("sk-existing",))
+
+    assert ensure_scrape_key(fake.admin(), env) == "sk-existing"
+    assert ("/key/update", {"key": "sk-existing", **SCRAPE_LIMITS}) in fake.calls
+    assert "/key/generate" not in fake.paths()
+
+
+def test_ensure_user_leaves_an_existing_user_alone() -> None:
+    fake = FakeLiteLLM({})
+    fake.users["prometheus"] = "proxy_admin_viewer"
+
+    fake.admin().ensure_user("prometheus", role="proxy_admin_viewer")
+
+    assert "/user/new" not in fake.paths()
 
 
 def test_gateway_pod_from_the_kubernetes_api() -> None:

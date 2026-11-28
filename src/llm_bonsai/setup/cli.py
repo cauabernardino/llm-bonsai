@@ -3,7 +3,7 @@ from typing import Annotated
 import typer
 
 from llm_bonsai.lab import Lab
-from llm_bonsai.setup import infra, preflight, teams
+from llm_bonsai.setup import infra, preflight, prometheus, teams
 
 app = typer.Typer(
     help="Build the lab, one step at a time or all at once. Every step is safe to re-run.",
@@ -95,3 +95,13 @@ def teams_command(ctx: typer.Context) -> None:
     lab = Lab.of(ctx)
     with lab.gateway.admin() as admin:
         teams.ensure_teams(admin, lab.env)
+
+
+@app.command("prometheus")
+def prometheus_command(ctx: typer.Context) -> None:
+    """Optional: one Prometheus pod scraping the gateway with a key limited to /metrics (needs the gateway)."""
+    lab = Lab.of(ctx)
+    with lab.gateway.admin() as admin:
+        scrape_key = prometheus.ensure_scrape_key(admin, lab.env)
+    lab.installer.install_prometheus(scrape_key)
+    print("Prometheus is up; `llm-bonsai ui` serves it on http://localhost:9090")

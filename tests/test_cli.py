@@ -20,7 +20,7 @@ def test_command_tree() -> None:
     assert subcommands() == {"setup", "probe", "ui", "teardown"}
     assert subcommands("setup") == {
         "preflight", "cluster", "namespaces", "secrets", "ollama", "postgres", "valkey",
-        "cert-manager", "clickhouse-operator", "langfuse", "litellm", "all", "teams",
+        "cert-manager", "clickhouse-operator", "langfuse", "litellm", "all", "teams", "prometheus",
     }  # fmt: skip
     assert subcommands("probe") == {"smoke", "fallback", "limits", "cache", "replicas", "chaos", "load", "app", "eval"}
 

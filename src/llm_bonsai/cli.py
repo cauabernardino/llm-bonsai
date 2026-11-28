@@ -12,7 +12,7 @@ from typing import Annotated
 import typer
 
 from llm_bonsai import __version__
-from llm_bonsai.catalog import GATEWAY, LANGFUSE
+from llm_bonsai.catalog import GATEWAY, LANGFUSE, PROMETHEUS
 from llm_bonsai.clients.tunnels import PortForward, port_in_use
 from llm_bonsai.config import LabConfig
 from llm_bonsai.errors import LabError
@@ -33,21 +33,39 @@ app.add_typer(probe_app, name="probe")
 
 @app.command("ui")
 def ui(ctx: typer.Context) -> None:
-    """Open Langfuse on localhost:3000 and the LiteLLM UI on localhost:4000 until Ctrl-C."""
+    """Open Langfuse on localhost:3000, the LiteLLM UI on localhost:4000 and, if installed, Prometheus on
+    localhost:9090, until Ctrl-C."""
+    kube = Lab.of(ctx).kube
     # Fixed ports, unlike the commands' own tunnels: Langfuse's login only works on the
     # URL it was configured with (NEXTAUTH_URL=http://localhost:3000).
-    pages = [(LANGFUSE, 3000), (GATEWAY, 4000)]
-    busy = [port for _, port in pages if port_in_use(port)]
+    pages = [
+        (
+            LANGFUSE,
+            3000,
+            "Langfuse:   http://localhost:3000     log in with LANGFUSE_INIT_USER_EMAIL / _PASSWORD from .env",
+        ),
+        (GATEWAY, 4000, "LiteLLM UI: http://localhost:4000/ui  log in as admin with LITELLM_MASTER_KEY from .env"),
+    ]
+    if kube.kubectl(
+        "get", "service", PROMETHEUS.name, "--ignore-not-found", "-o", "name", namespace=PROMETHEUS.namespace
+    ):
+        pages.append(
+            (
+                PROMETHEUS,
+                9090,
+                "Prometheus: http://localhost:9090     no login; Status → Targets shows the gateway pods",
+            )
+        )
+    busy = [port for _, port, _ in pages if port_in_use(port)]
     if busy:
         raise LabError(f"port {' and '.join(map(str, busy))} already in use (an old `kubectl port-forward`?)")
-    kube = Lab.of(ctx).kube
-    forwards = [PortForward(kube, service, port) for service, port in pages]
+    forwards = [PortForward(kube, service, port) for service, port, _ in pages]
     try:
         for forward in forwards:
             forward.open()
-        print("Langfuse:   http://localhost:3000     log in with LANGFUSE_INIT_USER_EMAIL / _PASSWORD from .env")
-        print("LiteLLM UI: http://localhost:4000/ui  log in as admin with LITELLM_MASTER_KEY from .env")
-        print("Ctrl-C closes both.", flush=True)
+        for _, _, how_to in pages:
+            print(how_to)
+        print("Ctrl-C closes them.", flush=True)
         threading.Event().wait()
     except KeyboardInterrupt:
         print("\nclosed")
