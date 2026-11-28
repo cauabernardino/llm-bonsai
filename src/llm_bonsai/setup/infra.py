@@ -6,6 +6,7 @@ or `install_all`, can be re-run to converge the cluster on what is in infra/.
 
 from collections.abc import Callable, Iterable
 from functools import partial
+from typing import Any
 
 from llm_bonsai.catalog import LLM_NAMESPACE, OBSERVABILITY_NAMESPACE
 from llm_bonsai.clients.kube import Kube
@@ -63,6 +64,29 @@ LANGFUSE = Chart(
 CLUSTER_CPUS = 6
 CLUSTER_MEMORY_GIB = 14
 CLUSTER_DISK_GB = 40
+
+# Where minikube's storage-provisioner keeps each volume: <root><namespace>/<claim name>.
+HOSTPATH_ROOT = "/tmp/hostpath-provisioner/"  # noqa: S108 (a path on the node, not a local temp file)
+
+
+def orphaned_volumes(volumes: Iterable[dict[str, Any]]) -> tuple[list[str], list[str]]:
+    """Names of the PVs once claimed from the lab's namespaces, and the node directories holding their data.
+
+    Only meaningful after every claim in those namespaces is deleted. minikube's provisioner
+    stamps each PV with an identity it picks at random on startup and deletes only PVs carrying
+    its current one, so after a restart a deleted claim leaves its PV Released and its data on
+    the node. A new claim with the same name gets the same directory, stale data included.
+    """
+    names: list[str] = []
+    paths: list[str] = []
+    for volume in volumes:
+        if volume["spec"].get("claimRef", {}).get("namespace") not in (LLM_NAMESPACE, OBSERVABILITY_NAMESPACE):
+            continue
+        names.append(volume["metadata"]["name"])
+        path = volume["spec"].get("hostPath", {}).get("path", "")
+        if path.startswith(HOSTPATH_ROOT):
+            paths.append(path)
+    return names, paths
 
 
 def create_cluster() -> None:
@@ -155,9 +179,20 @@ class Installer:
             partial(helm, "uninstall", OLLAMA.release, "-n", OLLAMA.namespace),
             partial(kubectl, "delete", "--ignore-not-found", "-f", manifests[0], "-f", manifests[1]),
             partial(kubectl, "delete", "pvc", "--all", namespace=LLM_NAMESPACE),
+            self.delete_orphaned_volumes,
         ]
         for step in steps:
             try:
                 print(step(), end="", flush=True)
             except LabError as error:
                 print(f"skipped: {error}")
+
+    def delete_orphaned_volumes(self) -> str:
+        """Delete what the provisioner may have left behind (see `orphaned_volumes`)."""
+        names, paths = orphaned_volumes(self._kube.kubectl_json("get", "pv")["items"])
+        if not names:
+            return "no volumes left behind\n"
+        self._kube.kubectl("delete", "pv", "--ignore-not-found", *names)
+        if paths:
+            run("minikube", "ssh", "--", "sudo", "rm", "-rf", *paths)
+        return f"deleted {len(names)} leftover volumes and {len(paths)} data directories on the node\n"

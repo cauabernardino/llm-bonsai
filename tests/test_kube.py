@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -54,3 +55,25 @@ def test_every_values_file_exists() -> None:
 def test_missing_infra_file_says_where_to_run_from(tmp_path: Path) -> None:
     with pytest.raises(LabError, match="checkout"):
         LabConfig(root=tmp_path, kube_context="x").infra_file("nope.yaml")
+
+
+def volume(name: str, namespace: str, path: str | None = None) -> dict[str, Any]:
+    spec: dict[str, Any] = {"claimRef": {"namespace": namespace, "name": "claim"}}
+    if path is not None:
+        spec["hostPath"] = {"path": path}
+    return {"metadata": {"name": name}, "spec": spec}
+
+
+def test_orphaned_volumes_are_the_lab_namespaces_pvs_and_their_minikube_directories() -> None:
+    volumes = [
+        volume("ollama", "llm", "/tmp/hostpath-provisioner/llm/ollama"),
+        volume("keeper", "observability", "/tmp/hostpath-provisioner/observability/keeper"),
+        volume("other-app", "default", "/tmp/hostpath-provisioner/default/data"),
+        volume("not-hostpath", "llm"),
+        volume("outside-root", "llm", "/var/lib/data"),
+        {"metadata": {"name": "unclaimed"}, "spec": {"hostPath": {"path": "/tmp/hostpath-provisioner/x"}}},
+    ]
+    assert infra.orphaned_volumes(volumes) == (
+        ["ollama", "keeper", "not-hostpath", "outside-root"],
+        ["/tmp/hostpath-provisioner/llm/ollama", "/tmp/hostpath-provisioner/observability/keeper"],
+    )
