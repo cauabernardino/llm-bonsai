@@ -45,14 +45,16 @@ flowchart LR
 | Disk | ≥ 40 GiB free where Docker keeps its data |
 | Tools | `kubectl` ≥ 1.36, `helm` ≥ 3.8, `minikube` ≥ 1.39, plus [`uv`](https://docs.astral.sh/uv/) to install the CLI |
 
-The cluster takes 14 GiB; see the [memory budget](#memory-budget). **Tested end to end on** macOS 26 on Apple Silicon (24 GB, Docker Desktop with Docker Engine 29.9, kubectl 1.37, helm 4.3, minikube 1.39). Preflight's Linux and WSL2 rules are covered by unit tests, but nobody has run the whole lab on Linux yet; reports are welcome.
+The cluster takes 14 GiB; see the [memory budget](#memory-budget). **Tested end to end on** macOS 26 on Apple Silicon (24 GB, Docker Desktop with Docker Engine 29.9, kubectl 1.37, helm 4.3, minikube 1.39). Preflight's Linux and WSL2 rules are covered by unit tests, but nobody has run the whole lab on Linux yet; a [run report](https://github.com/cauabernardino/llm-bonsai/issues/new?template=run-report.yml) is welcome.
 
-Install the tools, then the CLI from a checkout:
+Install the tools, then the CLI:
 
 ```bash
 brew install kubernetes-cli helm minikube uv   # macOS; on Linux use the links below
-uv tool install .                              # puts `llm-bonsai` on your PATH
+uv tool install git+https://github.com/cauabernardino/llm-bonsai   # puts `llm-bonsai` on your PATH
 ```
+
+The installed CLI keeps its `.env` in `~/.config/llm-bonsai/`. To change the code or run the tests, clone the repo instead and run `uv sync`; commands then run as `uv run llm-bonsai …`, with `.env` in the checkout. The two are separate labs' credentials: see [Lab home](#lab-home) and [CONTRIBUTING.md](CONTRIBUTING.md).
 
 On Linux: [Docker Engine](https://docs.docker.com/engine/install/), [kubectl](https://kubernetes.io/docs/tasks/tools/install-kubectl-linux/), [helm](https://helm.sh/docs/intro/install/), [minikube](https://minikube.sigs.k8s.io/docs/start/) and [uv](https://docs.astral.sh/uv/getting-started/installation/). On macOS, use Homebrew's `kubectl`: the one Docker Desktop ships can be too old for the cluster.
 
@@ -145,7 +147,7 @@ Replies stream token by token. The CLI keeps the history and sends it with every
 With `llm-bonsai ui` running in another terminal:
 
 ```bash
-set -a; . ./.env; set +a     # load the keys (sourcing strips the quotes .env stores them with)
+set -a; . ~/.config/llm-bonsai/.env; set +a   # load the keys (./.env in a checkout); sourcing strips their quotes
 
 curl localhost:4000/v1/chat/completions \
   -H "Authorization: Bearer $LITELLM_KEY_SUPPORT_BOT" -H 'Content-Type: application/json' \
@@ -475,7 +477,7 @@ Prometheus is the only optional piece today, and `setup all` doesn't install it.
 | `connection refused` on `localhost:3000`, `:4000` or `:9090` | Only `llm-bonsai ui` forwards those ports. | Run `llm-bonsai ui`. |
 | `llm-bonsai ui`: `port ... already in use` | Usually a leftover `kubectl port-forward`. | `pkill -f 'port-forward svc/'`, then `llm-bonsai ui`. |
 | `curl … /metrics` prints nothing | The 307 redirect to `/metrics/`. | Add `-L`, or use `/metrics/`. |
-| 401 with `Received='sk-****…', expected to start with 'sk-'` | The key was read from `.env` with its quotes (e.g. via `cut`). | `. ./.env` instead. |
+| 401 with `Received='sk-****…', expected to start with 'sk-'` | The key was read from `.env` with its quotes (e.g. via `cut`). | Source the file instead: `set -a; . <lab home>/.env; set +a`. |
 | `probe app` / `probe eval`: `NotFoundError` from Langfuse | Langfuse was reset while a run started. | Re-run; the probes recreate the prompt and dataset. |
 | `kubectl top` shows tiny or stale numbers | metrics-server lags up to a minute. | Wait and retry. |
 | Odd `kubectl` errors | The client is more than one minor version from the server. | `brew install kubernetes-cli`; check `which kubectl`. |

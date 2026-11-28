@@ -1,0 +1,48 @@
+name: Run report
+description: You ran the lab on a machine it isn't tested on yet (Linux, WSL2, Intel Mac…). Tell us how it went.
+labels: [run report]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The lab is only tested end to end on macOS on Apple Silicon. A report from anywhere else helps, whether it worked or not.
+  - type: input
+    id: machine
+    attributes:
+      label: Machine
+      description: OS and version, CPU, RAM, and the Docker flavour (Docker Engine, Docker Desktop, WSL2…).
+      placeholder: Ubuntu 26.04, Ryzen 7 7840U, 32 GB, Docker Engine 29.9
+    validations:
+      required: true
+  - type: textarea
+    id: preflight
+    attributes:
+      label: llm-bonsai setup preflight
+      description: Its full output. Its disk path may include your username.
+      render: text
+    validations:
+      required: true
+  - type: checkboxes
+    id: steps
+    attributes:
+      label: What worked
+      options:
+        - label: setup cluster
+        - label: setup all
+        - label: setup teams
+        - label: probe smoke
+        - label: the other probes
+        - label: setup prometheus
+        - label: teardown
+  - type: textarea
+    id: notes
+    attributes:
+      label: What didn't, and anything you had to change
+      description: Errors with their output, timings that looked off, or steps the README missed.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "`llm-bonsai --version`, and the commit: `git rev-parse --short HEAD` in a checkout, or the date you ran `uv tool install`."
+    validations:
+      required: true
