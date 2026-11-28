@@ -47,7 +47,7 @@ Two namespaces: `llm` (Ollama, LiteLLM, Postgres, Valkey) and `observability` (L
 | 4 | Gateway probes: fallback, limits, cache, replicas, chaos, load test | ✅ |
 | 4b | Tooling packaged as the `llm-bonsai` CLI | ✅ |
 | 5 | App tracing with nested spans, prompt versions, a mini eval | ✅ |
-| 6 | Prometheus metrics (optional) | planned |
+| 6 | Prometheus metrics (optional): the gateway's `/metrics` | ✅ part 1 (no Prometheus pod yet) |
 | 7 | vLLM on CPU (optional) | planned |
 | 8 | Argo CD (optional) | planned |
 
@@ -628,6 +628,40 @@ How to read it:
 - `strict` answers are shorter and quote the context, and they show the model's limits too: #2 uses the wrong snippet, and #5 says "I don't know" although the chargeback snippet was retrieved.
 
 Run the other version (`--prompt baseline` / `--prompt strict`) and the eval prints a link that opens both runs side by side.
+
+---
+
+## Phase 6: Gateway metrics
+
+**What it does.** Turns on LiteLLM's `prometheus` callback (`litellm_settings.callbacks` in `infra/litellm/values.yaml`, next to `langfuse_otel`). The gateway then serves Prometheus text on `/metrics`, on its usual port 4000. It's part of the open-source proxy; nothing has to be licensed.
+
+**Try it.** With `make ui` running in another terminal:
+
+```sh
+. ./.env   # loads LITELLM_MASTER_KEY into this shell (values in .env are quoted; sourcing strips the quotes)
+curl -sL -H "Authorization: Bearer $LITELLM_MASTER_KEY" localhost:4000/metrics | grep '^litellm_'
+```
+
+After one `make smoke`, that's ~300 samples across ~75 metric names (abridged; `hashed_api_key`, ids and most labels cut):
+
+```
+litellm_proxy_total_requests_metric_total{api_key_alias="support-bot-key",requested_model="chat-small",route="/v1/chat/completions",status_code="200",team_alias="support-bot",…} 2.0
+litellm_proxy_failed_requests_metric_total{requested_model="chat-broken",exception_class="Ollama_chat.APIConnectionError",exception_status="500",…} 1.0
+litellm_spend_metric_total{api_key_alias="support-bot-key",model="qwen2.5:0.5b",requested_model="chat-small",team_alias="support-bot",…} 0.009
+litellm_llm_api_time_to_first_token_metric_count{model_group="chat-small",…} 1.0
+litellm_remaining_api_key_budget_metric{api_key_alias="support-bot-key",…} 999.991
+litellm_remaining_team_budget_metric{team_alias="support-bot",…} +Inf
+```
+
+How to read it:
+
+- **Auth:** `/metrics` needs the **master key**. No key, or a team's key, gets HTTP 401 ("Only proxy admin can …"). `require_auth_for_metrics_endpoint` defaults to `true` in v1.111; setting it to `false` opens the endpoint to anyone who can reach the port. A real Prometheus then needs a bearer token, which means an admin credential in its scrape config.
+- **`-L` matters:** `/metrics` is a mounted sub-app, so the gateway answers `307` to `/metrics/` first. Without `-L` (or the trailing slash), curl prints the empty redirect body and the `grep` finds nothing.
+- **The same questions as Langfuse, answered differently:** requests, failures, tokens, spend and latency (`litellm_request_total_latency_metric`, `…_llm_api_latency_metric`, time to first token), per key, team and model group. Langfuse keeps each request so you can drill into one; Prometheus keeps counters you can graph and alert on, which is how an on-call engineer finds out that fallbacks spiked at 3 am.
+- **Budgets:** the keys have budgets (`remaining_api_key_budget` 999.991 of 1000), the teams don't, so their remaining budget is `+Inf`.
+- **Even the rejected scrapes are counted:** they show up as `route="/metrics"`, `status_code="401"`.
+- **Cardinality:** labels include `hashed_api_key`, `client_ip`, `user_agent` and `end_user`, so every new key or client adds series. That's harmless at lab scale, but at real scale it's the first thing to trim (`litellm_settings.prometheus_exclude_labels`).
+- Not shown here: a Prometheus server scraping this over time (the optional second part of this phase), and queue depth, which only the model server knows (vLLM's `num_requests_waiting`, Phase 7).
 
 ---
 

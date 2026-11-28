@@ -110,7 +110,11 @@ gateway:
         # Sends every request (successes and failures) to Langfuse as OpenTelemetry spans.
         # Not the classic `langfuse` callback: Langfuse v4 disables the legacy ingestion
         # API it uses by default, so it would silently log nothing.
-        callbacks: ["langfuse_otel"]
+        #
+        # `prometheus` mounts /metrics on the proxy's own port. Scrapes need a key, like any other
+        # route (require_auth_for_metrics_endpoint defaults to true). With one worker the samples
+        # live in that process; more workers would need PROMETHEUS_MULTIPROC_DIR.
+        callbacks: ["langfuse_otel", "prometheus"]
         # Turned into trace tags from the request's metadata. The gateway fills these from
         # the virtual key, so the team on a trace can't be forgotten or spoofed by the client.
         langfuse_default_tags: ["user_api_key_alias", "user_api_key_team_alias"]
