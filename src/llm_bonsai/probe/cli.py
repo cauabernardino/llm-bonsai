@@ -29,7 +29,7 @@ def fallback_command(ctx: typer.Context) -> None:
 
 @app.command("limits")
 def limits_command(ctx: typer.Context) -> None:
-    """Hit a 3 requests/minute limit, then spend through a $0.05 budget (~2 min: waits out the window)."""
+    """Hit a 3 requests/minute limit, then spend through a $0.05 budget (~1.5 min: waits out the window)."""
     limits.run(Lab.of(ctx))
 
 
@@ -52,7 +52,7 @@ def replicas_command(
 ) -> None:
     """Hit one rate limit through 2 gateway replicas, without and then with Valkey.
 
-    Takes ~4 min: redeploys the gateway 3 times, ending at 1 replica.
+    Takes ~2.5 min: redeploys the gateway 3 times, ending at 1 replica.
     """
     replicas.run(Lab.of(ctx), keep_replicas)
 
@@ -100,5 +100,5 @@ def eval_command(
     prompt: PromptOption = Variant.baseline,
     judge: Annotated[bool, typer.Option(help="Also score answers with chat-small as an LLM judge.")] = True,
 ) -> None:
-    """Score the support assistant over a Langfuse dataset, as one experiment run (~1 min)."""
+    """Score the support assistant over a Langfuse dataset, as one experiment run (~40 s)."""
     evaluation.run(Lab.of(ctx), prompt, judge)
