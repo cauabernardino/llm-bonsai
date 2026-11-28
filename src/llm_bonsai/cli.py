@@ -8,7 +8,7 @@ import sys
 import threading
 from dataclasses import dataclass
 from types import FrameType
-from typing import Annotated, Any
+from typing import Annotated, TypeGuard
 
 import httpx
 import typer
@@ -140,15 +140,19 @@ def exit_on_sigterm(signum: int, frame: FrameType | None) -> None:
     sys.exit(128 + signum)
 
 
+def is_json_object(value: object) -> TypeGuard[dict[str, object]]:
+    return isinstance(value, dict)
+
+
 def describe(error: httpx.HTTPStatusError) -> str:
     """One line for a failed management API call. The path only: a query string could hold a key."""
     request, response = error.request, error.response
     try:
-        detail: Any = response.json()
+        detail: object = response.json()
     except ValueError:
         detail = response.text
     # LiteLLM nests its message as {"detail": {"error": …}} or {"error": {"message": …}}; Langfuse {"message": …}.
-    while isinstance(detail, dict):
+    while is_json_object(detail):
         field = next((f for f in ("error", "detail", "message") if f in detail), None)
         if field is None:
             break

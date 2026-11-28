@@ -129,7 +129,10 @@ def test_every_minikube_command_names_the_profile(monkeypatch: pytest.MonkeyPatc
 
 
 def test_a_missing_context_points_at_setup_cluster(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("llm_bonsai.clients.kube.run", lambda *cmd, **kwargs: "minikube\nkind-dev\n")
+    def contexts(*cmd: str, **kwargs: object) -> str:
+        return "minikube\nkind-dev\n"
+
+    monkeypatch.setattr("llm_bonsai.clients.kube.run", contexts)
     with pytest.raises(LabError, match="setup cluster") as raised:
         KUBE.require_context()
     assert "LLM_BONSAI_CONTEXT=minikube" in str(raised.value)
