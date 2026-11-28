@@ -1,5 +1,6 @@
 import base64
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -43,7 +44,7 @@ def test_secrets_come_from_the_env_file_not_the_shell(tmp_path: Path, monkeypatc
 def test_missing_value_is_a_lab_error(tmp_path: Path) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text("LITELLM_MASTER_KEY=sk-x\n")
-    with pytest.raises(LabError, match=r"missing from \.env; run `llm-bonsai setup secrets`"):
+    with pytest.raises(LabError, match=rf"missing from {re.escape(str(env_file))}; run `llm-bonsai setup secrets`"):
         credentials.kubernetes_secrets(EnvFile(env_file))
 
 

@@ -11,7 +11,7 @@ from typing import Any
 from llm_bonsai.catalog import LLM_NAMESPACE, OBSERVABILITY_NAMESPACE
 from llm_bonsai.clients.kube import Kube
 from llm_bonsai.clients.shell import run
-from llm_bonsai.config import EnvFile
+from llm_bonsai.config import EnvFile, infra_file
 from llm_bonsai.errors import LabError
 from llm_bonsai.models import Chart
 from llm_bonsai.setup import credentials
@@ -113,7 +113,7 @@ class Installer:
 
     def install_secrets(self) -> None:
         added = self._env.fill_missing(credentials.GENERATORS)
-        print(f"{self._env.path.name}: added {', '.join(added) if added else 'nothing (all present)'}")
+        print(f"{self._env.path}: added {', '.join(added) if added else 'nothing (all present)'}")
         self._kube.apply_objects(credentials.kubernetes_secrets(self._env))
 
     def install_ollama(self) -> None:
@@ -179,8 +179,8 @@ class Installer:
         """Remove the lab's releases and data, keeping the cluster and its cluster-wide
         prerequisites (cert-manager, the ClickHouse operator). Missing pieces are skipped."""
         helm, kubectl = self._kube.helm, self._kube.kubectl
-        manifests = [str(self._kube.config.infra_file(f)) for f in ("valkey/valkey.yaml", "postgres/postgres.yaml")]
-        prometheus = str(self._kube.config.infra_file("prometheus/prometheus.yaml"))
+        manifests = [str(infra_file(f)) for f in ("valkey/valkey.yaml", "postgres/postgres.yaml")]
+        prometheus = str(infra_file("prometheus/prometheus.yaml"))
         steps: list[Callable[[], str]] = [
             partial(kubectl, "delete", "--ignore-not-found", "-f", prometheus),
             partial(helm, "uninstall", LANGFUSE.release, "-n", LANGFUSE.namespace, "--wait"),

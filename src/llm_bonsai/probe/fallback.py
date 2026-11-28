@@ -57,7 +57,7 @@ def takeaways(headers: Mapping[str, str], generations: list[Observation]) -> lis
     if not attempted or attempted == "0":
         return [
             f"The headers record no fallback (attempted-fallbacks: {attempted}); check router_settings.fallbacks "
-            "in infra/litellm/values.yaml."
+            "in src/llm_bonsai/infra/litellm/values.yaml."
         ]
     bullets = [
         "The client asked for chat-broken and got a normal HTTP 200. Only the response headers say a "

@@ -4,13 +4,13 @@ from typing import Any
 import pytest
 
 from llm_bonsai.clients.kube import Kube
-from llm_bonsai.config import LabConfig
+from llm_bonsai.config import CHECKOUT, INFRA, LabConfig, infra_file, lab_home
 from llm_bonsai.errors import LabError
 from llm_bonsai.models import Chart
 from llm_bonsai.setup import infra
 
 CONFIG = LabConfig.from_environment()
-KUBE = Kube(LabConfig(root=CONFIG.root, kube_context="lab-ctx"))
+KUBE = Kube(LabConfig(home=CONFIG.home, kube_context="lab-ctx"))
 
 
 def test_upgrade_args_for_a_repo_chart_with_values_and_overrides() -> None:
@@ -25,7 +25,7 @@ def test_upgrade_args_for_a_repo_chart_with_values_and_overrides() -> None:
     )
     assert KUBE.upgrade_args(chart, ["a=1", "b="]) == [
         "upgrade", "--install", "ollama", "ollama", "--version", "1.0.0", "-n", "llm",
-        "--repo", "https://example.test/", "-f", str(CONFIG.root / "infra/ollama/values.yaml"),
+        "--repo", "https://example.test/", "-f", str(INFRA / "ollama/values.yaml"),
         "--wait", "--timeout", "10m", "--set", "a=1", "--set", "b=",
     ]  # fmt: skip
 
@@ -46,15 +46,30 @@ def test_context_comes_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> 
     assert LabConfig.from_environment().kube_context == "other"
 
 
-def test_every_values_file_exists() -> None:
-    for chart in [infra.OLLAMA, infra.LITELLM, infra.CERT_MANAGER, infra.CLICKHOUSE_OPERATOR, infra.LANGFUSE]:
-        if chart.values:
-            assert CONFIG.infra_file(chart.values).is_file()
+def test_every_infra_file_ships_inside_the_package() -> None:
+    charts = [infra.OLLAMA, infra.LITELLM, infra.CERT_MANAGER, infra.CLICKHOUSE_OPERATOR, infra.LANGFUSE]
+    manifests = ["namespaces.yaml", "postgres/postgres.yaml", "valkey/valkey.yaml", "prometheus/prometheus.yaml"]
+    for relative in [*(chart.values for chart in charts if chart.values), *manifests]:
+        assert infra_file(relative).is_relative_to(INFRA)
 
 
-def test_missing_infra_file_says_where_to_run_from(tmp_path: Path) -> None:
-    with pytest.raises(LabError, match="checkout"):
-        LabConfig(root=tmp_path, kube_context="x").infra_file("nope.yaml")
+def test_missing_infra_file_says_to_reinstall() -> None:
+    with pytest.raises(LabError, match="reinstall"):
+        infra_file("nope.yaml")
+
+
+def test_lab_home_prefers_llm_bonsai_home(tmp_path: Path) -> None:
+    assert lab_home({"LLM_BONSAI_HOME": str(tmp_path)}) == tmp_path
+
+
+def test_lab_home_is_the_checkout_when_running_from_one() -> None:
+    # The tests themselves run from the checkout.
+    assert lab_home({}) == CHECKOUT
+
+
+def test_lab_home_of_an_installed_package_is_the_config_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("llm_bonsai.config.CHECKOUT", tmp_path / "site-packages-parent")
+    assert lab_home({"XDG_CONFIG_HOME": str(tmp_path)}) == tmp_path / "llm-bonsai"
 
 
 def volume(name: str, namespace: str, path: str | None = None) -> dict[str, Any]:

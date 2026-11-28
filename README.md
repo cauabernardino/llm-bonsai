@@ -100,7 +100,8 @@ The `make` targets are shortcuts for the CLI, which does all the work. `make up`
 ```bash
 uv run llm-bonsai --help                 # setup / probe / ui / teardown
 uv run llm-bonsai setup --help           # preflight, cluster, namespaces, secrets, ollama, postgres, valkey,
-                                         # cert-manager, clickhouse-operator, langfuse, litellm, all, teams
+                                         # cert-manager, clickhouse-operator, langfuse, litellm, all, teams,
+                                         # prometheus (optional)
 uv run llm-bonsai setup langfuse         # e.g. re-apply only Langfuse after editing its values
 uv run llm-bonsai probe --help           # smoke, fallback, limits, cache, replicas, chaos, load, app, eval
 ```
@@ -119,23 +120,41 @@ Both ask before deleting anything (`--yes` skips the question). Every `kubectl` 
 
 Secrets live in `.env` (gitignored). `llm-bonsai setup secrets` (run by `make up`) generates random dev-only values the first time and never rotates them afterwards. See `.env.example` for the variables.
 
+### Running it as an installed package
+
+The wheel is self-contained: the Helm values and manifests ship inside it (`src/llm_bonsai/infra/`), so the CLI works without the repository.
+
+```bash
+uv build                                             # dist/llm_bonsai-0.1.0-py3-none-any.whl
+uv tool install dist/llm_bonsai-0.1.0-py3-none-any.whl
+llm-bonsai setup preflight
+```
+
+Only `.env` lives outside the package. The CLI looks for it in the **lab home**:
+
+1. `$LLM_BONSAI_HOME`, if set;
+2. otherwise the checkout, when running from one (`uv run llm-bonsai`, as in the rest of this README);
+3. otherwise `~/.config/llm-bonsai/` (or `$XDG_CONFIG_HOME/llm-bonsai/`), created on first `setup secrets`.
+
+A different lab home means a different `.env`. On a lab that's already running, a fresh `.env` gets new random passwords from `setup secrets`, which then no longer match the existing databases. To drive a lab built from the checkout with the installed CLI, point it at the existing file: `export LLM_BONSAI_HOME=/path/to/llm-bonsai`.
+
 ## Repository layout
 
 ```
 Makefile                  shortcuts for the CLI, plus `make check`
-infra/
-  namespaces.yaml
-  ollama/values.yaml      Helm values for the Ollama chart
-  postgres/postgres.yaml  StatefulSet + Service (official postgres image)
-  valkey/valkey.yaml      Deployment + Service (official valkey image)
-  litellm/values.yaml     Helm values for the LiteLLM chart, including the model config
-  cert-manager/values.yaml
-  langfuse/values.yaml    Helm values for the Langfuse chart, sized for a laptop
-  prometheus/prometheus.yaml  optional: one Prometheus pod scraping the gateway (Phase 6)
 src/llm_bonsai/           the Python package behind the `llm-bonsai` command
+  infra/                  what the CLI installs; ships inside the package
+    namespaces.yaml
+    ollama/values.yaml      Helm values for the Ollama chart
+    postgres/postgres.yaml  StatefulSet + Service (official postgres image)
+    valkey/valkey.yaml      Deployment + Service (official valkey image)
+    litellm/values.yaml     Helm values for the LiteLLM chart, including the model config
+    cert-manager/values.yaml
+    langfuse/values.yaml    Helm values for the Langfuse chart, sized for a laptop
+    prometheus/prometheus.yaml  optional: one Prometheus pod scraping the gateway (Phase 6)
   cli.py                  the root command: setup / probe / ui / teardown
   lab.py                  Lab: the clients one command uses, closed (with its port-forwards) when it ends
-  config.py               LabConfig (repo root, kube context) and EnvFile (.env, the only source of credentials)
+  config.py               LabConfig (lab home, kube context), EnvFile (.env, the only source of credentials), infra files
   catalog.py              what the lab consists of: namespaces, Services, model groups, teams
   models.py               shared records: Chart, Service, Team, GatewayPod, Observation, Attempt
   assistant.py            the demo support assistant: FAQ retrieval, Langfuse-managed prompt, traced answer
@@ -372,7 +391,7 @@ curl -u "$LANGFUSE_PUBLIC_KEY:$LANGFUSE_SECRET_KEY" \
 
 Each opens its own port-forwards, so nothing else needs to be running. If the gateway doesn't answer, the probe says so and stops instead of crashing.
 
-Two config changes come with this phase (`infra/litellm/values.yaml`):
+Two config changes come with this phase (`src/llm_bonsai/infra/litellm/values.yaml`):
 
 - `redis.host` points at Valkey, so rate limits and spend counters are **shared across gateway replicas**;
 - a **response cache** in Valkey, **opt-in** per request (`cache_params.mode: default_off`). With caching on for everything, the limits, budget and load probes would measure the cache instead of the model, and cached answers cost $0, so no budget could ever be reached.
@@ -635,7 +654,7 @@ Run the other version (`--prompt baseline` / `--prompt strict`) and the eval pri
 
 ## Phase 6: Gateway metrics
 
-**What it does.** Turns on LiteLLM's `prometheus` callback (`litellm_settings.callbacks` in `infra/litellm/values.yaml`, next to `langfuse_otel`). The gateway then serves Prometheus text on `/metrics`, on its usual port 4000. It's part of the open-source proxy; nothing has to be licensed.
+**What it does.** Turns on LiteLLM's `prometheus` callback (`litellm_settings.callbacks` in `src/llm_bonsai/infra/litellm/values.yaml`, next to `langfuse_otel`). The gateway then serves Prometheus text on `/metrics`, on its usual port 4000. It's part of the open-source proxy; nothing has to be licensed.
 
 **Try it.** With `make ui` running in another terminal:
 
@@ -672,7 +691,7 @@ uv run llm-bonsai setup prometheus   # optional, not part of `make up`; needs th
 make ui                              # now also serves Prometheus on localhost:9090
 ```
 
-This adds one Prometheus pod (`infra/prometheus/prometheus.yaml`: a plain manifest, a day of retention in an `emptyDir`, a 512Mi memory limit) that scrapes the gateway every 15 s. Prometheus has no login; its **Status → Targets** page should show each gateway pod as `UP`. Some queries to paste into its **Query** page:
+This adds one Prometheus pod (`src/llm_bonsai/infra/prometheus/prometheus.yaml`: a plain manifest, a day of retention in an `emptyDir`, a 512Mi memory limit) that scrapes the gateway every 15 s. Prometheus has no login; its **Status → Targets** page should show each gateway pod as `UP`. Some queries to paste into its **Query** page:
 
 | Question | PromQL |
 |---|---|
@@ -714,7 +733,7 @@ With `make ui` running (log in to Langfuse with `LANGFUSE_INIT_USER_EMAIL` / `_P
 |---|---|---|
 | LiteLLM pods exit immediately with **code 132** and no logs | `Illegal instruction`. Older Docker Desktop VMs on Apple Silicon advertise a CPU feature (SVE2) the chip doesn't have, and the newer C library in LiteLLM's image tries to use it. Check with `docker run --rm python:3.13-slim python -c "import ctypes; print(bool(ctypes.CDLL(None).getauxval(26) & 2))"`: `True` means affected. | Update Docker Desktop, then recreate the cluster (`make nuke cluster up`). |
 | `docker inspect minikube` shows `OOMKilled=true` / the whole cluster stops | The Docker VM has barely more memory than minikube's limit, so the VM itself runs out (image unpacking makes it worse). | Give Docker Desktop ≥ 17 GB, then `minikube start`. Changing Docker's resources restarts its VM and stops minikube. |
-| LiteLLM pod `OOMKilled`, `CrashLoopBackOff` | LiteLLM needs ~1.8 GiB while starting up, even though it settles at ~1.2 GiB. | Keep the memory limit ≥ 2.5 GiB (as in `infra/litellm/values.yaml`). |
+| LiteLLM pod `OOMKilled`, `CrashLoopBackOff` | LiteLLM needs ~1.8 GiB while starting up, even though it settles at ~1.2 GiB. | Keep the memory limit ≥ 2.5 GiB (as in `src/llm_bonsai/infra/litellm/values.yaml`). |
 | `helm upgrade`: `another operation (install/upgrade/rollback) is in progress` | A previous `helm` run was interrupted and left the release `pending-install`. | For a first install: `helm uninstall litellm -n llm`, then `uv run llm-bonsai setup litellm`. |
 | `helm upgrade`: `conflict with "kubectl-set"` (or another manager) | Helm 4 uses server-side apply, and a field was changed by hand with `kubectl`. | Undo the manual change, or run the `helm upgrade` once with `--force-conflicts` to hand the field back to Helm. |
 | Embeddings return 400 `encoding_format ... not supported by ollama` | The OpenAI SDK's default base64 encoding. | Keep `litellm_settings.drop_params: true`, or pass `encoding_format="float"` from the client. |
@@ -734,7 +753,7 @@ With `make ui` running (log in to Langfuse with `LANGFUSE_INIT_USER_EMAIL` / `_P
 
 ## Security notes
 
-This is a local lab. All credentials are random, dev-only values in a gitignored `.env`. Nothing is exposed beyond `localhost` (only `kubectl port-forward`, opened per command), and Valkey runs without auth inside the cluster. No real provider keys are needed or used. A cloud model would only ever appear as a commented-out entry in `infra/litellm/values.yaml` reading its key from the environment.
+This is a local lab. All credentials are random, dev-only values in a gitignored `.env`. Nothing is exposed beyond `localhost` (only `kubectl port-forward`, opened per command), and Valkey runs without auth inside the cluster. No real provider keys are needed or used. A cloud model would only ever appear as a commented-out entry in `src/llm_bonsai/infra/litellm/values.yaml` reading its key from the environment.
 
 ## Pinned versions
 

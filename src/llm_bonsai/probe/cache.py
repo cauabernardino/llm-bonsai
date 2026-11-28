@@ -65,7 +65,7 @@ def takeaways(first: Reply, repeat: Reply, changed: Reply, skipped: Reply) -> li
     if not repeat.hit:
         return [
             "#2 was a cache miss too, so the cache isn't working: check that Valkey is running and "
-            "cache_params in infra/litellm/values.yaml."
+            "cache_params in src/llm_bonsai/infra/litellm/values.yaml."
         ]
     identical = "word for word #1's answer" if repeat.answer == first.answer else "yet its answer differs from #1's"
     bullets = [

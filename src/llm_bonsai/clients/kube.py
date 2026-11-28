@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from llm_bonsai.clients.shell import run
-from llm_bonsai.config import LabConfig
+from llm_bonsai.config import LabConfig, infra_file
 from llm_bonsai.errors import LabError
 from llm_bonsai.models import Chart
 
@@ -27,7 +27,7 @@ class Kube:
 
     def apply_file(self, relative: str) -> None:
         """`kubectl apply` a manifest under infra/."""
-        print(self.kubectl("apply", "-f", str(self.config.infra_file(relative))), end="", flush=True)
+        print(self.kubectl("apply", "-f", str(infra_file(relative))), end="", flush=True)
 
     def apply_objects(self, objects: Iterable[dict[str, Any]]) -> None:
         """`kubectl apply` objects built in Python, so re-runs update instead of failing."""
@@ -65,7 +65,7 @@ class Kube:
         if chart.repo:
             args += ["--repo", chart.repo]
         if chart.values:
-            args += ["-f", str(self.config.infra_file(chart.values))]
+            args += ["-f", str(infra_file(chart.values))]
         if chart.create_namespace:
             args.append("--create-namespace")
         if chart.wait_timeout:
