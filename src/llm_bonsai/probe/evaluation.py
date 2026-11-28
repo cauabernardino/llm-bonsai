@@ -24,8 +24,8 @@ from llm_bonsai.catalog import CHAT_SMALL, SUPPORT_BOT
 from llm_bonsai.clients.langfuse import Langfuse, experiments_url
 from llm_bonsai.lab import Lab
 
-if TYPE_CHECKING:  # the SDK doesn't re-export it
-    from langfuse._client.datasets import DatasetClient
+if TYPE_CHECKING:  # the SDK doesn't re-export it, so it can only come from its private package
+    from langfuse._client.datasets import DatasetClient  # pyright: ignore[reportMissingTypeStubs]
 
 DATASET = "support-faq"
 
@@ -168,7 +168,7 @@ def one_line(text: str) -> str:
 
 
 def takeaways(rows: list[Row], total: int, judge: bool) -> list[str]:
-    bullets = []
+    bullets: list[str] = []
     if len(rows) < total:
         bullets.append(f"{total - len(rows)} of {total} items failed (error or timeout) and have no scores.")
     hits = sum(r.keyword for r in rows)

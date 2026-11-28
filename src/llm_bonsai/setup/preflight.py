@@ -13,7 +13,7 @@ import subprocess
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from rich.text import Text
 
@@ -139,7 +139,7 @@ def docker_info(system: str) -> Docker | None:
         info = json.loads(out)
     except ValueError:
         return None
-    return parse_docker_info(info, system) if isinstance(info, dict) else None
+    return parse_docker_info(cast(dict[str, Any], info), system) if isinstance(info, dict) else None
 
 
 def parse_docker_info(info: dict[str, Any], system: str) -> Docker | None:

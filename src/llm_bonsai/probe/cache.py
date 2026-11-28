@@ -9,7 +9,6 @@ import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
 
 import openai
 from rich.text import Text
@@ -23,7 +22,7 @@ from llm_bonsai.lab import Lab
 class Request:
     label: str
     use_cache: bool
-    params: dict[str, Any]
+    temperature: float | None = None  # None: the model's default
 
 
 @dataclass(frozen=True)
@@ -42,10 +41,10 @@ class Reply:
 
 
 REQUESTS = [
-    Request("opt in", use_cache=True, params={}),
-    Request("opt in, same as #1", use_cache=True, params={}),
-    Request("opt in, temperature=0.1", use_cache=True, params={"temperature": 0.1}),
-    Request("no opt-in", use_cache=False, params={}),
+    Request("opt in", use_cache=True),
+    Request("opt in, same as #1", use_cache=True),
+    Request("opt in, temperature=0.1", use_cache=True, temperature=0.1),
+    Request("no opt-in", use_cache=False),
 ]
 
 
@@ -55,7 +54,7 @@ def send(client: openai.OpenAI, prompt: str, request: Request) -> Reply:
         model=CHAT_SMALL,
         messages=[{"role": "user", "content": prompt}],
         extra_body={"cache": {"use-cache": request.use_cache}},
-        **request.params,
+        temperature=openai.omit if request.temperature is None else request.temperature,
     )
     elapsed = time.perf_counter() - start
     answer = (raw.parse().choices[0].message.content or "").strip().replace("\n", " / ")

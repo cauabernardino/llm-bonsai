@@ -13,6 +13,7 @@ import time
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
 
@@ -75,7 +76,8 @@ class LoadGenerator:
             async for line in response.aiter_lines():
                 if not line.startswith("data: ") or line == "data: [DONE]":
                     continue
-                choices = json.loads(line.removeprefix("data: ")).get("choices") or [{}]
+                event: dict[str, Any] = json.loads(line.removeprefix("data: "))
+                choices: list[dict[str, Any]] = event.get("choices") or [{}]
                 if ttft is None and choices[0].get("delta", {}).get("content"):
                     ttft = time.perf_counter() - start
         return ttft, None
@@ -155,7 +157,7 @@ def takeaways(levels: list[Level], model: str) -> list[str]:
     """What the sweep showed. Assumes every level has successful requests, so its percentiles are set."""
     server = SERVER_NAME.get(model, "the model server")
     by_concurrency = {level.concurrency: level for level in levels}
-    bullets = []
+    bullets: list[str] = []
     if model == CHAT_SMALL and 1 in by_concurrency and 2 in by_concurrency:
         one, two = by_concurrency[1], by_concurrency[2]
         assert one.ttft50 is not None and two.ttft50 is not None and one.p50 is not None and two.p50 is not None
@@ -204,7 +206,7 @@ def run(lab: Lab, levels: list[int], duration: float, model: str, max_tokens: in
     results_table = report.table(
         *map(report.right, COLUMNS), "errors", title=f"{model}, {duration:.0f}s per concurrency level", caption=LEGEND
     )
-    measured = []
+    measured: list[Level] = []
     with report.live(results_table):
         for concurrency in levels:
             results = asyncio.run(generator.run(concurrency, duration))

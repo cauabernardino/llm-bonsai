@@ -8,7 +8,7 @@ Nothing printed is parsed as rich markup or emoji codes: model answers, error me
 and log lines are full of brackets and colons.
 """
 
-from collections.abc import Iterable, Iterator
+from collections.abc import Generator, Iterable
 from contextlib import contextmanager
 
 from rich import box
@@ -87,7 +87,7 @@ def table(*columns: str | Column, title: str | None = None, caption: str | None 
 
 
 @contextmanager
-def live(renderable: RenderableType) -> Iterator[None]:
+def live(renderable: RenderableType) -> Generator[None]:
     """Redraw `renderable` while the block runs. When stdout isn't a terminal, print it once
     at the end instead: rich's Live leaves the last line without a newline there."""
     if not console.is_terminal:

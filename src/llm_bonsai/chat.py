@@ -15,7 +15,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 import openai
-from openai.types.chat import ChatCompletionMessageParam
+from openai.types.chat import (
+    ChatCompletionAssistantMessageParam,
+    ChatCompletionMessageParam,
+    ChatCompletionUserMessageParam,
+)
 from rich.text import Text
 
 from llm_bonsai import report
@@ -23,12 +27,10 @@ from llm_bonsai.catalog import LANGFUSE_PROJECT_ID, LANGFUSE_UI_URL, SUPPORT_BOT
 from llm_bonsai.clients.langfuse import run_id
 from llm_bonsai.lab import Lab
 
-try:  # POSIX only; without them the chat still works, it just echoes keys typed during a reply
-    import readline
+# POSIX only. On Windows the chat still works; it just echoes keys typed during a reply.
+if sys.platform != "win32":
+    import readline  # also gives the prompt line editing and history
     import termios
-except ImportError:  # pragma: no cover
-    readline = None  # type: ignore[assignment]
-    termios = None  # type: ignore[assignment]
 
 
 class Command(Enum):
@@ -86,15 +88,14 @@ class Keyboard:
     middle of the reply; what was typed comes back at the next prompt instead."""
 
     def __init__(self) -> None:
-        interactive = termios is not None and sys.stdin.isatty()
-        self._fd = sys.stdin.fileno() if interactive else None
+        self._fd = sys.stdin.fileno() if sys.platform != "win32" and sys.stdin.isatty() else None
         self._lines: list[str] = []
         self._partial = ""
 
     @contextmanager
     def quiet(self) -> Generator[None]:
         fd = self._fd
-        if fd is None:
+        if sys.platform == "win32" or fd is None:
             yield
             return
         saved = termios.tcgetattr(fd)
@@ -117,19 +118,20 @@ class Keyboard:
             report.console.print(prompt, line, sep="")
             return line
         prefill, self._partial = self._partial, ""
-        if prefill and readline is not None:
+        if sys.platform == "win32":
+            return report.console.input(prompt)
+        if prefill:
             readline.set_startup_hook(lambda: readline.insert_text(prefill))
         try:
             return report.console.input(prompt)
         finally:
-            if readline is not None:
-                readline.set_startup_hook(None)
+            readline.set_startup_hook(None)
 
 
 @dataclass
 class Conversation:
     system: str | None = None
-    turns: list[ChatCompletionMessageParam] = field(default_factory=list)
+    turns: list[ChatCompletionMessageParam] = field(default_factory=list[ChatCompletionMessageParam])
 
     def messages(self, user_text: str) -> list[ChatCompletionMessageParam]:
         """What the model sees for a new user message: the system prompt, the turns so far, then it."""
@@ -137,7 +139,9 @@ class Conversation:
         return [*system, *self.turns, {"role": "user", "content": user_text}]
 
     def record(self, user_text: str, reply: str) -> None:
-        self.turns += [{"role": "user", "content": user_text}, {"role": "assistant", "content": reply}]
+        asked: ChatCompletionUserMessageParam = {"role": "user", "content": user_text}
+        answered: ChatCompletionAssistantMessageParam = {"role": "assistant", "content": reply}
+        self.turns += [asked, answered]
 
 
 @dataclass(frozen=True)

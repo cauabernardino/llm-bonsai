@@ -27,7 +27,7 @@ class TraceShape:
 
 
 def ancestors(observation: Observation, by_id: dict[str, Observation]) -> list[str]:
-    names = []
+    names: list[str] = []
     while observation.parent_id in by_id:
         observation = by_id[observation.parent_id]
         names.append(observation.name)
@@ -71,7 +71,7 @@ def tree(observations: list[Observation]) -> list[str]:
 
 
 def takeaways(trace: TraceShape) -> list[str]:
-    bullets = []
+    bullets: list[str] = []
     if trace.nested:
         bullets.append(
             f"One trace holds the whole request: the {ROOT} span, with {RETRIEVAL} and {ANSWER} under it, so "
