@@ -105,7 +105,7 @@ Each probe opens its own port-forwards, so nothing else has to be running. Each 
 
 ### Where to look
 
-`llm-bonsai ui` forwards these to your machine until Ctrl-C. The credentials are in `.env`.
+`llm-bonsai ui` forwards these to your machine until Ctrl-C. The credentials are in `.env`. The ports are fixed, unlike the probes' tunnels: Langfuse only accepts logins on the URL it was installed with (`NEXTAUTH_URL=http://localhost:3000`).
 
 | What | URL | Log in with |
 |---|---|---|
@@ -418,7 +418,7 @@ The CLI ships its Helm values and manifests inside the package (`src/llm_bonsai/
 ## Repository layout
 
 ```
-Makefile                  shortcuts for the CLI, plus `make check` (ruff, mypy --strict, pytest)
+Makefile                  shortcuts for the CLI, plus `make check` (ruff, mypy and pyright strict, pytest)
 src/llm_bonsai/           the package behind the `llm-bonsai` command
   infra/                  what the CLI installs (Helm values, plain manifests); ships in the wheel
   cli.py                  root command: setup / probe / ui / teardown
@@ -475,7 +475,7 @@ Prometheus is the only optional piece today, and `setup all` doesn't install it.
 | A probe says `the gateway didn't answer` | The gateway pod is restarting or still starting. | `kubectl -n llm get pods` and the gateway's logs. |
 | 2 gateway replicas left running after killing `probe replicas` | It restores on errors and a single Ctrl-C, not when killed outright. | `llm-bonsai setup litellm`. |
 | `connection refused` on `localhost:3000`, `:4000` or `:9090` | Only `llm-bonsai ui` forwards those ports. | Run `llm-bonsai ui`. |
-| `llm-bonsai ui`: `port ... already in use` | Usually a leftover `kubectl port-forward`. | `pkill -f 'port-forward svc/'`, then `llm-bonsai ui`. |
+| `llm-bonsai ui`: `port ... already in use` | Usually a leftover `kubectl port-forward`, or a dev server on 3000. | `pkill -f 'port-forward svc/'`, or free the port (`lsof -i :3000`), then `llm-bonsai ui`. |
 | `curl … /metrics` prints nothing | The 307 redirect to `/metrics/`. | Add `-L`, or use `/metrics/`. |
 | 401 with `Received='sk-****…', expected to start with 'sk-'` | The key was read from `.env` with its quotes (e.g. via `cut`). | Source the file instead: `set -a; . <lab home>/.env; set +a`. |
 | `probe app` / `probe eval`: `NotFoundError` from Langfuse | Langfuse was reset while a run started. | Re-run; the probes recreate the prompt and dataset. |

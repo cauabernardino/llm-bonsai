@@ -7,7 +7,7 @@ Issues and pull requests are welcome. For anything larger than a fix, open an is
 ```bash
 git clone https://github.com/cauabernardino/llm-bonsai && cd llm-bonsai
 uv sync                      # Python 3.12+, dev tools included
-make check                   # ruff, ruff format --check, mypy --strict, pytest: what CI runs, plus `uv build`
+make check                   # ruff, mypy and pyright (strict), pytest: what CI runs, plus `uv build`
 uv run llm-bonsai --help     # the CLI from your checkout; its .env lives here
 ```
 
@@ -49,6 +49,6 @@ Model groups, teams and their limits are in `src/llm_bonsai/catalog.py`. The gat
 
 ## Code and commits
 
-- Type everything. `mypy --strict` must pass, and `uvx pyright` (strict mode, set in `pyproject.toml`) stays clean too.
+- Type everything. `make check` runs both mypy and pyright in strict mode.
 - Comments explain why, not what. Leave out notes about how the code came to be.
 - Commits get a title that says what changed and a short body that says why. One concern per commit.
